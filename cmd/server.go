@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/marccampbell/creddy/pkg/server"
+	"github.com/getcreddy/creddy/pkg/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

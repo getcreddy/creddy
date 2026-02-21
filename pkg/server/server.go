@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/marccampbell/creddy/pkg/backend"
-	"github.com/marccampbell/creddy/pkg/signing"
-	"github.com/marccampbell/creddy/pkg/store"
+	"github.com/getcreddy/creddy/pkg/backend"
+	"github.com/getcreddy/creddy/pkg/signing"
+	"github.com/getcreddy/creddy/pkg/store"
 )
 
 type Server struct {
