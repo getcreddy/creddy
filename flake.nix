@@ -14,7 +14,7 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            go_1_23  # Latest stable, 1.25 not yet released
+            go  # Latest stable
             gopls
             golangci-lint
             sqlite
