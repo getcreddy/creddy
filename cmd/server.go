@@ -3,6 +3,10 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
 	"github.com/marccampbell/creddy/pkg/server"
 	"github.com/spf13/cobra"
@@ -19,8 +23,36 @@ var serverCmd = &cobra.Command{
 			listen = "127.0.0.1:8400"
 		}
 
-		srv := server.New()
+		dbPath := viper.GetString("database.path")
+		if dbPath == "" {
+			home, _ := os.UserHomeDir()
+			dbPath = filepath.Join(home, ".creddy", "creddy.db")
+		}
+
+		// Ensure directory exists
+		os.MkdirAll(filepath.Dir(dbPath), 0700)
+
+		srv, err := server.New(server.Config{
+			DBPath: dbPath,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to start server: %w", err)
+		}
+		defer srv.Close()
+
+		// Handle graceful shutdown
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		go func() {
+			<-sigCh
+			fmt.Println("\nShutting down...")
+			srv.Close()
+			os.Exit(0)
+		}()
+
 		fmt.Printf("Starting creddy server on %s\n", listen)
+		fmt.Printf("Database: %s\n", dbPath)
 		return http.ListenAndServe(listen, srv.Handler())
 	},
 }
@@ -28,5 +60,7 @@ var serverCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(serverCmd)
 	serverCmd.Flags().String("listen", "127.0.0.1:8400", "Address to listen on")
+	serverCmd.Flags().String("db", "", "Database path")
 	viper.BindPFlag("server.listen", serverCmd.Flags().Lookup("listen"))
+	viper.BindPFlag("database.path", serverCmd.Flags().Lookup("db"))
 }
