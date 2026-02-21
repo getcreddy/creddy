@@ -29,11 +29,17 @@ var serverCmd = &cobra.Command{
 			dbPath = filepath.Join(home, ".creddy", "creddy.db")
 		}
 
+		domain := viper.GetString("server.domain")
+		if domain == "" {
+			domain = "creddy.local"
+		}
+
 		// Ensure directory exists
 		os.MkdirAll(filepath.Dir(dbPath), 0700)
 
 		srv, err := server.New(server.Config{
 			DBPath: dbPath,
+			Domain: domain,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to start server: %w", err)
@@ -61,6 +67,8 @@ func init() {
 	rootCmd.AddCommand(serverCmd)
 	serverCmd.Flags().String("listen", "127.0.0.1:8400", "Address to listen on")
 	serverCmd.Flags().String("db", "", "Database path")
+	serverCmd.Flags().String("domain", "creddy.local", "Domain for agent email addresses")
 	viper.BindPFlag("server.listen", serverCmd.Flags().Lookup("listen"))
 	viper.BindPFlag("database.path", serverCmd.Flags().Lookup("db"))
+	viper.BindPFlag("server.domain", serverCmd.Flags().Lookup("domain"))
 }

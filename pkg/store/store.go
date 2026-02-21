@@ -90,7 +90,20 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+
+	// Additional migrations
+	if err := s.migrateAudit(); err != nil {
+		return err
+	}
+	if err := s.migrateKeys(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func generateID() string {
+	return uuid.New().String()
 }
 
 func (s *Store) Close() error {

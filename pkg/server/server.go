@@ -13,18 +13,21 @@ import (
 	"time"
 
 	"github.com/marccampbell/creddy/pkg/backend"
+	"github.com/marccampbell/creddy/pkg/signing"
 	"github.com/marccampbell/creddy/pkg/store"
 )
 
 type Server struct {
 	store    *store.Store
 	backends *backend.Manager
+	domain   string
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
 
 type Config struct {
 	DBPath string
+	Domain string // Domain for agent email addresses (e.g., creddy.dev)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -35,9 +38,15 @@ func New(cfg Config) (*Server, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	domain := cfg.Domain
+	if domain == "" {
+		domain = "creddy.local"
+	}
+
 	s := &Server{
 		store:    st,
 		backends: backend.NewManager(),
+		domain:   domain,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -116,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	// Agent self-service
 	mux.HandleFunc("GET /v1/active", s.handleListActive)
 	mux.HandleFunc("DELETE /v1/active/{id}", s.handleRevokeCredential)
+	mux.HandleFunc("GET /v1/signing-key", s.handleGetSigningKey)
 
 	// Admin endpoints (no auth for now - bind to localhost/tailnet only)
 	mux.HandleFunc("GET /v1/admin/agents", s.handleListAgents)
@@ -124,6 +134,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/backends", s.handleListBackends)
 	mux.HandleFunc("POST /v1/admin/backends", s.handleCreateBackend)
 	mux.HandleFunc("DELETE /v1/admin/backends/{name}", s.handleDeleteBackend)
+	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
+	mux.HandleFunc("GET /v1/admin/keys", s.handleListPublicKeys)
 
 	return s.withMiddleware(mux)
 }
@@ -196,13 +208,25 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 
 	// Record the active credential
 	scopes := r.URL.Query().Get("scope")
-	_, err = s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), scopes, expiresAt)
+	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), scopes, expiresAt)
 	if err != nil {
 		log.Printf("Warning: failed to record credential: %v", err)
 	}
 
 	// Update agent last used
 	s.store.UpdateAgentLastUsed(agent.ID)
+
+	// Audit log
+	tokenID := ""
+	if activeCred != nil {
+		tokenID = activeCred.ID
+	}
+	details, _ := json.Marshal(map[string]interface{}{
+		"ttl":        ttl.String(),
+		"expires_at": expiresAt,
+		"scopes":     scopes,
+	})
+	s.store.LogAuditEvent(agent.ID, agent.Name, "token_issued", backendName, string(details), tokenID, r.RemoteAddr)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"token":      cred.Value,
@@ -326,13 +350,35 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	// Generate GPG signing key for the agent
+	keyPair, err := signing.GenerateKeyPair(req.Name, s.domain)
+	if err != nil {
+		log.Printf("Warning: failed to generate signing key for agent %s: %v", req.Name, err)
+	} else {
+		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
+		if err != nil {
+			log.Printf("Warning: failed to store signing key for agent %s: %v", req.Name, err)
+		}
+	}
+
+	// Audit log
+	details, _ := json.Marshal(map[string]interface{}{"scopes": req.Scopes})
+	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_created", "", string(details), "", r.RemoteAddr)
+
+	response := map[string]interface{}{
 		"id":         agent.ID,
 		"name":       agent.Name,
 		"token":      token, // Only shown once!
 		"scopes":     req.Scopes,
 		"created_at": agent.CreatedAt,
-	})
+	}
+
+	if keyPair != nil {
+		response["signing_key_id"] = keyPair.KeyID
+		response["signing_email"] = keyPair.Email
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +467,115 @@ func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
 	// TODO: remove from s.backends manager
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		return
+	}
+
+	key, err := s.store.GetSigningKeyByAgent(agent.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no signing key found for this agent")
+		return
+	}
+
+	// Update last accessed
+	s.store.UpdateKeyLastAccessed(agent.ID)
+
+	// Audit log
+	s.store.LogAuditEvent(agent.ID, agent.Name, "key_accessed", "", "", "", r.RemoteAddr)
+
+	// Return based on format requested
+	format := r.URL.Query().Get("format")
+	if format == "git" {
+		// Return in a format suitable for git config
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"signing_key":  key.PrivateKey,
+			"key_id":       key.KeyID,
+			"email":        key.Email,
+			"name":         key.Name,
+			"git_config": map[string]string{
+				"user.name":       key.Name,
+				"user.email":      key.Email,
+				"user.signingkey": key.KeyID,
+				"commit.gpgsign":  "true",
+			},
+		})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"key_id":      key.KeyID,
+			"public_key":  key.PublicKey,
+			"private_key": key.PrivateKey,
+			"email":       key.Email,
+			"name":        key.Name,
+		})
+	}
+}
+
+func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
+	// Parse query params
+	limitStr := r.URL.Query().Get("limit")
+	limit := 100
+	if limitStr != "" {
+		fmt.Sscanf(limitStr, "%d", &limit)
+	}
+
+	agentID := r.URL.Query().Get("agent_id")
+	action := r.URL.Query().Get("action")
+
+	events, err := s.store.GetAuditLog(limit, agentID, action)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get audit log")
+		return
+	}
+
+	results := make([]map[string]interface{}, len(events))
+	for i, e := range events {
+		results[i] = map[string]interface{}{
+			"id":         e.ID,
+			"timestamp":  e.Timestamp,
+			"agent_id":   e.AgentID,
+			"agent_name": e.AgentName,
+			"action":     e.Action,
+			"backend":    e.Backend,
+			"details":    e.Details,
+			"token_id":   e.TokenID,
+			"ip_address": e.IPAddress,
+		}
+	}
+
+	json.NewEncoder(w).Encode(results)
+}
+
+func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.store.ListPublicKeys()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list keys")
+		return
+	}
+
+	results := make([]map[string]interface{}, len(keys))
+	for i, k := range keys {
+		results[i] = map[string]interface{}{
+			"key_id":     k.KeyID,
+			"agent_id":   k.AgentID,
+			"email":      k.Email,
+			"name":       k.Name,
+			"public_key": k.PublicKey,
+			"created_at": k.CreatedAt,
+		}
+	}
+
+	json.NewEncoder(w).Encode(results)
 }
 
 // Helpers
