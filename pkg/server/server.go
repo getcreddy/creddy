@@ -137,6 +137,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleListPublicKeys)
 
+	// Enrollment endpoints (new PKI-based auth)
+	s.RegisterEnrollmentRoutes(mux)
+
 	return s.withMiddleware(mux)
 }
 
