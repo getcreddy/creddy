@@ -1,0 +1,37 @@
+# Binaries
+creddy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+config.yaml
+*.pem
+
+# Database
+*.db
+*.sqlite
+
+# Nix
+result
+.direnv/
