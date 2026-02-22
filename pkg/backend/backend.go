@@ -11,10 +11,16 @@ type Token struct {
 	ExpiresAt time.Time
 }
 
+// TokenRequest contains parameters for requesting a token
+type TokenRequest struct {
+	InstallationID int64    // GitHub: installation ID
+	Repos          []string // GitHub: list of owner/repo to scope token to
+}
+
 // Backend is the interface that all credential backends must implement
 type Backend interface {
 	// GetToken generates a new ephemeral token
-	GetToken(installationID int64) (*Token, error)
+	GetToken(req TokenRequest) (*Token, error)
 	// Type returns the backend type (e.g., "github", "aws")
 	Type() string
 }
@@ -24,8 +30,8 @@ type GitHubBackendWrapper struct {
 	*GitHubBackend
 }
 
-func (g *GitHubBackendWrapper) GetToken(installationID int64) (*Token, error) {
-	token, err := g.GitHubBackend.GetToken(installationID)
+func (g *GitHubBackendWrapper) GetToken(req TokenRequest) (*Token, error) {
+	token, err := g.GitHubBackend.GetToken(req.InstallationID, req.Repos)
 	if err != nil {
 		return nil, err
 	}

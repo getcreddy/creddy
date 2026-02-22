@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -60,14 +62,36 @@ func (g *GitHubBackend) GenerateJWT() (string, error) {
 }
 
 // GetInstallationToken generates an installation access token
-func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken, error) {
+// If repos is non-empty, the token is scoped to only those repositories
+func (g *GitHubBackend) GetInstallationToken(installationID int64, repos []string) (*GitHubToken, error) {
 	jwtToken, err := g.GenerateJWT()
 	if err != nil {
 		return nil, err
 	}
 
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
-	req, err := http.NewRequest("POST", url, nil)
+
+	var reqBody io.Reader
+	if len(repos) > 0 {
+		// Scope token to specific repositories
+		// GitHub API wants just repo names, not owner/repo
+		repoNames := make([]string, len(repos))
+		for i, repo := range repos {
+			// Extract repo name from owner/repo format
+			parts := splitRepo(repo)
+			if len(parts) == 2 {
+				repoNames[i] = parts[1]
+			} else {
+				repoNames[i] = repo
+			}
+		}
+		bodyJSON, _ := json.Marshal(map[string]interface{}{
+			"repositories": repoNames,
+		})
+		reqBody = bytes.NewReader(bodyJSON)
+	}
+
+	req, err := http.NewRequest("POST", url, reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +99,9 @@ func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -100,6 +127,15 @@ func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken
 		Token:     result.Token,
 		ExpiresAt: result.ExpiresAt,
 	}, nil
+}
+
+func splitRepo(repo string) []string {
+	for i, c := range repo {
+		if c == '/' {
+			return []string{repo[:i], repo[i+1:]}
+		}
+	}
+	return []string{repo}
 }
 
 // ListInstallations returns all installations for this GitHub App
@@ -149,7 +185,8 @@ type Installation struct {
 
 // GetToken generates an ephemeral installation token
 // If installationID is 0, it will use the first installation found (or the configured one)
-func (g *GitHubBackend) GetToken(installationID int64) (*GitHubToken, error) {
+// If repos is non-empty, the token is scoped to only those repositories
+func (g *GitHubBackend) GetToken(installationID int64, repos []string) (*GitHubToken, error) {
 	if installationID == 0 {
 		installationID = g.config.InstallationID
 	}
@@ -166,5 +203,42 @@ func (g *GitHubBackend) GetToken(installationID int64) (*GitHubToken, error) {
 		installationID = installations[0].ID
 	}
 
-	return g.GetInstallationToken(installationID)
+	return g.GetInstallationToken(installationID, repos)
+}
+
+// MatchesScope checks if the requested repos are allowed by the scope
+// Scope format: "github:owner/repo" or "github:owner/*" or "github:*"
+func MatchesGitHubScope(scope string, requestedRepos []string) bool {
+	// Remove "github:" prefix
+	if !strings.HasPrefix(scope, "github:") {
+		return false
+	}
+	pattern := strings.TrimPrefix(scope, "github:")
+
+	// Wildcard - allow all
+	if pattern == "*" {
+		return true
+	}
+
+	for _, repo := range requestedRepos {
+		if !matchRepoPattern(pattern, repo) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchRepoPattern(pattern, repo string) bool {
+	// Exact match
+	if pattern == repo {
+		return true
+	}
+
+	// Owner wildcard: "owner/*" matches "owner/anything"
+	if strings.HasSuffix(pattern, "/*") {
+		owner := strings.TrimSuffix(pattern, "/*")
+		return strings.HasPrefix(repo, owner+"/")
+	}
+
+	return false
 }

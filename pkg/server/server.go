@@ -175,9 +175,12 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check agent has permission for this backend
-	if !agentCanAccessBackend(agent, backendName) {
-		writeError(w, http.StatusForbidden, "agent not authorized for this backend")
+	// Parse repos from query params (can be specified multiple times)
+	repos := r.URL.Query()["repo"]
+
+	// Check agent has permission for this backend and repos
+	if !agentCanAccessBackend(agent, backendName, repos) {
+		writeError(w, http.StatusForbidden, "agent not authorized for this backend/repos")
 		return
 	}
 
@@ -200,7 +203,9 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate credential
-	cred, err := b.GetToken(0) // TODO: support installation ID parameter
+	cred, err := b.GetToken(backend.TokenRequest{
+		Repos: repos,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate credential: "+err.Error())
 		return
@@ -232,6 +237,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		"ttl":        ttl.String(),
 		"expires_at": expiresAt,
 		"scopes":     scopes,
+		"repos":      repos,
 	})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "token_issued", backendName, string(details), tokenID, r.RemoteAddr)
 
@@ -796,20 +802,42 @@ func generateToken() string {
 	return "ckr_" + hex.EncodeToString(b)
 }
 
-func agentCanAccessBackend(agent *store.Agent, backendName string) bool {
+func agentCanAccessBackend(agent *store.Agent, backendName string, repos []string) bool {
 	// Parse agent scopes
 	var scopes []string
 	json.Unmarshal([]byte(agent.Scopes), &scopes)
 
-	// Check if any scope matches
+	// No scopes means access to all (for backwards compatibility during dev)
+	if len(scopes) == 0 {
+		return true
+	}
+
+	// Check if any scope matches the backend and repos
 	for _, scope := range scopes {
-		// Scope format: "backend:permission" or just "backend"
+		// Scope format: "backend:owner/repo" or "backend:owner/*" or "backend:*" or "backend"
 		parts := strings.SplitN(scope, ":", 2)
-		if parts[0] == backendName || parts[0] == "*" {
+		scopeBackend := parts[0]
+
+		// Check backend matches
+		if scopeBackend != backendName && scopeBackend != "*" {
+			continue
+		}
+
+		// If no repos requested, any matching backend scope is fine
+		if len(repos) == 0 {
+			return true
+		}
+
+		// For GitHub, check repo access
+		if backendName == "github" && len(parts) > 1 {
+			if backend.MatchesGitHubScope(scope, repos) {
+				return true
+			}
+		} else if len(parts) == 1 {
+			// Old-style scope without repo restriction
 			return true
 		}
 	}
 
-	// No scopes means access to all (for backwards compatibility during dev)
-	return len(scopes) == 0
+	return false
 }

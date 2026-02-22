@@ -18,12 +18,14 @@ var getCmd = &cobra.Command{
 
 Examples:
   creddy get github --ttl 10m
-  creddy get github --ttl 1h --scope repo:read`,
+  creddy get github --repo owner/repo --ttl 10m
+  creddy get github --repo owner/repo1 --repo owner/repo2`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend := args[0]
 		ttl, _ := cmd.Flags().GetDuration("ttl")
 		scope, _ := cmd.Flags().GetStringSlice("scope")
+		repos, _ := cmd.Flags().GetStringSlice("repo")
 		outputJSON, _ := cmd.Flags().GetBool("json")
 
 		serverURL := viper.GetString("url")
@@ -40,6 +42,9 @@ Examples:
 		url := fmt.Sprintf("%s/v1/credentials/%s?ttl=%s", serverURL, backend, ttl)
 		for _, s := range scope {
 			url += "&scope=" + s
+		}
+		for _, r := range repos {
+			url += "&repo=" + r
 		}
 
 		req, err := http.NewRequest("POST", url, nil)
@@ -81,5 +86,6 @@ func init() {
 	rootCmd.AddCommand(getCmd)
 	getCmd.Flags().Duration("ttl", 10*time.Minute, "Time-to-live for the credential")
 	getCmd.Flags().StringSlice("scope", []string{}, "Requested scopes")
+	getCmd.Flags().StringSlice("repo", []string{}, "Repository to scope token to (owner/repo)")
 	getCmd.Flags().Bool("json", false, "Output full response as JSON")
 }
