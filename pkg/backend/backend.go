@@ -26,6 +26,15 @@ type Backend interface {
 	Type() string
 }
 
+// RevocableBackend is for backends that support explicit token revocation
+type RevocableBackend interface {
+	Backend
+	// GetTokenWithID returns token + external ID for later revocation
+	GetTokenWithID(req TokenRequest) (*Token, string, error)
+	// RevokeToken revokes a token by its external ID
+	RevokeToken(externalID string) error
+}
+
 // GitHubBackendWrapper wraps GitHubBackend to implement Backend interface
 type GitHubBackendWrapper struct {
 	*GitHubBackend
@@ -86,6 +95,12 @@ func LoadFromConfig(backendType, configJSON string) (Backend, error) {
 			return nil, err
 		}
 		return &GitHubBackendWrapper{gb}, nil
+	case "anthropic":
+		ab, err := NewAnthropic(configJSON)
+		if err != nil {
+			return nil, err
+		}
+		return ab, nil
 	default:
 		return nil, fmt.Errorf("unknown backend type: %s", backendType)
 	}

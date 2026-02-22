@@ -30,14 +30,15 @@ type Backend struct {
 }
 
 type ActiveCredential struct {
-	ID        string
-	AgentID   string
-	AgentName string
-	Backend   string
-	TokenHash string // We don't store the actual token
-	Scopes    string
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	ID         string
+	AgentID    string
+	AgentName  string
+	Backend    string
+	TokenHash  string // We don't store the actual token
+	ExternalID string // External ID for revocable backends (e.g., Anthropic key ID)
+	Scopes     string
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
 }
 
 func New(dbPath string) (*Store, error) {
@@ -76,6 +77,7 @@ func (s *Store) migrate() error {
 			agent_id TEXT NOT NULL,
 			backend TEXT NOT NULL,
 			token_hash TEXT NOT NULL,
+			external_id TEXT,
 			scopes TEXT DEFAULT '[]',
 			expires_at DATETIME NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -101,6 +103,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateEnroll(); err != nil {
 		return err
 	}
+
+	// Add external_id column if it doesn't exist (for revocable backends)
+	s.db.Exec(`ALTER TABLE active_credentials ADD COLUMN external_id TEXT`)
 
 	return nil
 }
@@ -258,11 +263,11 @@ func (s *Store) DeleteBackend(name string) error {
 
 // Active credential operations
 
-func (s *Store) CreateActiveCredential(agentID, backend, tokenHash, scopes string, expiresAt time.Time) (*ActiveCredential, error) {
+func (s *Store) CreateActiveCredential(agentID, backend, tokenHash, externalID, scopes string, expiresAt time.Time) (*ActiveCredential, error) {
 	id := uuid.New().String()
 	_, err := s.db.Exec(
-		`INSERT INTO active_credentials (id, agent_id, backend, token_hash, scopes, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, agentID, backend, tokenHash, scopes, expiresAt,
+		`INSERT INTO active_credentials (id, agent_id, backend, token_hash, external_id, scopes, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, agentID, backend, tokenHash, externalID, scopes, expiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -272,22 +277,26 @@ func (s *Store) CreateActiveCredential(agentID, backend, tokenHash, scopes strin
 
 func (s *Store) GetActiveCredential(id string) (*ActiveCredential, error) {
 	var c ActiveCredential
+	var externalID sql.NullString
 	err := s.db.QueryRow(
-		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.scopes, c.expires_at, c.created_at 
+		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.external_id, c.scopes, c.expires_at, c.created_at 
 		 FROM active_credentials c 
 		 JOIN agents a ON c.agent_id = a.id 
 		 WHERE c.id = ?`,
 		id,
-	).Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &c.Scopes, &c.ExpiresAt, &c.CreatedAt)
+	).Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &externalID, &c.Scopes, &c.ExpiresAt, &c.CreatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if externalID.Valid {
+		c.ExternalID = externalID.String
 	}
 	return &c, nil
 }
 
 func (s *Store) ListActiveCredentials() ([]*ActiveCredential, error) {
 	rows, err := s.db.Query(
-		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.scopes, c.expires_at, c.created_at 
+		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.external_id, c.scopes, c.expires_at, c.created_at 
 		 FROM active_credentials c 
 		 JOIN agents a ON c.agent_id = a.id 
 		 WHERE c.expires_at > CURRENT_TIMESTAMP
@@ -301,8 +310,12 @@ func (s *Store) ListActiveCredentials() ([]*ActiveCredential, error) {
 	var creds []*ActiveCredential
 	for rows.Next() {
 		var c ActiveCredential
-		if err := rows.Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
+		var externalID sql.NullString
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &externalID, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
 			return nil, err
+		}
+		if externalID.Valid {
+			c.ExternalID = externalID.String
 		}
 		creds = append(creds, &c)
 	}
@@ -311,7 +324,7 @@ func (s *Store) ListActiveCredentials() ([]*ActiveCredential, error) {
 
 func (s *Store) ListActiveCredentialsByAgent(agentID string) ([]*ActiveCredential, error) {
 	rows, err := s.db.Query(
-		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.scopes, c.expires_at, c.created_at 
+		`SELECT c.id, c.agent_id, a.name, c.backend, c.token_hash, c.external_id, c.scopes, c.expires_at, c.created_at 
 		 FROM active_credentials c 
 		 JOIN agents a ON c.agent_id = a.id 
 		 WHERE c.agent_id = ? AND c.expires_at > CURRENT_TIMESTAMP
@@ -326,8 +339,12 @@ func (s *Store) ListActiveCredentialsByAgent(agentID string) ([]*ActiveCredentia
 	var creds []*ActiveCredential
 	for rows.Next() {
 		var c ActiveCredential
-		if err := rows.Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
+		var externalID sql.NullString
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.AgentName, &c.Backend, &c.TokenHash, &externalID, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
 			return nil, err
+		}
+		if externalID.Valid {
+			c.ExternalID = externalID.String
 		}
 		creds = append(creds, &c)
 	}
@@ -339,10 +356,71 @@ func (s *Store) DeleteActiveCredential(id string) error {
 	return err
 }
 
+// GetExpiredCredentials returns credentials that have expired (for revocation)
+func (s *Store) GetExpiredCredentials() ([]*ActiveCredential, error) {
+	rows, err := s.db.Query(
+		`SELECT id, agent_id, backend, token_hash, external_id, scopes, expires_at, created_at 
+		 FROM active_credentials 
+		 WHERE expires_at <= CURRENT_TIMESTAMP`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var creds []*ActiveCredential
+	for rows.Next() {
+		var c ActiveCredential
+		var externalID sql.NullString
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.Backend, &c.TokenHash, &externalID, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if externalID.Valid {
+			c.ExternalID = externalID.String
+		}
+		creds = append(creds, &c)
+	}
+	return creds, nil
+}
+
 func (s *Store) DeleteExpiredCredentials() (int64, error) {
 	result, err := s.db.Exec(`DELETE FROM active_credentials WHERE expires_at <= CURRENT_TIMESTAMP`)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// GetAllCredentialsByAgent returns all credentials for an agent (including expired, for cleanup)
+func (s *Store) GetAllCredentialsByAgent(agentID string) ([]*ActiveCredential, error) {
+	rows, err := s.db.Query(
+		`SELECT id, agent_id, backend, token_hash, external_id, scopes, expires_at, created_at 
+		 FROM active_credentials 
+		 WHERE agent_id = ?`,
+		agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var creds []*ActiveCredential
+	for rows.Next() {
+		var c ActiveCredential
+		var externalID sql.NullString
+		if err := rows.Scan(&c.ID, &c.AgentID, &c.Backend, &c.TokenHash, &externalID, &c.Scopes, &c.ExpiresAt, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if externalID.Valid {
+			c.ExternalID = externalID.String
+		}
+		creds = append(creds, &c)
+	}
+	return creds, nil
+}
+
+// DeleteAllCredentialsByAgent removes all credentials for an agent
+func (s *Store) DeleteAllCredentialsByAgent(agentID string) error {
+	_, err := s.db.Exec(`DELETE FROM active_credentials WHERE agent_id = ?`, agentID)
+	return err
 }

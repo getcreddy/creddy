@@ -96,12 +96,44 @@ func (s *Server) reapExpiredCredentials() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			// Get expired credentials to revoke them first
+			expired, err := s.store.GetExpiredCredentials()
+			if err != nil {
+				log.Printf("Error getting expired credentials: %v", err)
+				continue
+			}
+
+			// Revoke from external backends
+			for _, cred := range expired {
+				if cred.ExternalID != "" {
+					s.revokeCredentialFromBackend(cred.Backend, cred.ExternalID)
+				}
+			}
+
+			// Delete from database
 			deleted, err := s.store.DeleteExpiredCredentials()
 			if err != nil {
 				log.Printf("Error reaping expired credentials: %v", err)
 			} else if deleted > 0 {
 				log.Printf("Reaped %d expired credentials", deleted)
 			}
+		}
+	}
+}
+
+// revokeCredentialFromBackend revokes a credential from the external service
+func (s *Server) revokeCredentialFromBackend(backendName, externalID string) {
+	b, err := s.backends.Get(backendName)
+	if err != nil {
+		log.Printf("Warning: backend %s not found for revocation", backendName)
+		return
+	}
+
+	if rb, ok := b.(backend.RevocableBackend); ok {
+		if err := rb.RevokeToken(externalID); err != nil {
+			log.Printf("Warning: failed to revoke %s token %s: %v", backendName, externalID, err)
+		} else {
+			log.Printf("Revoked %s token %s", backendName, externalID)
 		}
 	}
 }
@@ -243,10 +275,21 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate credential
-	cred, err := b.GetToken(backend.TokenRequest{
-		Repos:    repos,
-		ReadOnly: readOnly,
-	})
+	var cred *backend.Token
+	var externalID string
+
+	// Check if backend supports revocation (like Anthropic)
+	if rb, ok := b.(backend.RevocableBackend); ok {
+		cred, externalID, err = rb.GetTokenWithID(backend.TokenRequest{
+			Repos:    repos,
+			ReadOnly: readOnly,
+		})
+	} else {
+		cred, err = b.GetToken(backend.TokenRequest{
+			Repos:    repos,
+			ReadOnly: readOnly,
+		})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate credential: "+err.Error())
 		return
@@ -261,7 +304,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 
 	// Record the active credential
 	scopes := r.URL.Query().Get("scope")
-	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), scopes, expiresAt)
+	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), externalID, scopes, expiresAt)
 	if err != nil {
 		log.Printf("Warning: failed to record credential: %v", err)
 	}
@@ -438,10 +481,37 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
+	// Get agent to find their credentials
+	agent, err := s.store.GetAgentByName(name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+
+	// Revoke all active credentials from backends
+	creds, err := s.store.GetAllCredentialsByAgent(agent.ID)
+	if err != nil {
+		log.Printf("Warning: failed to get credentials for agent %s: %v", name, err)
+	} else {
+		for _, cred := range creds {
+			if cred.ExternalID != "" {
+				s.revokeCredentialFromBackend(cred.Backend, cred.ExternalID)
+			}
+		}
+	}
+
+	// Delete credentials from database
+	if err := s.store.DeleteAllCredentialsByAgent(agent.ID); err != nil {
+		log.Printf("Warning: failed to delete credentials for agent %s: %v", name, err)
+	}
+
+	// Delete the agent
 	if err := s.store.DeleteAgent(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete agent")
 		return
 	}
+
+	log.Printf("Unenrolled agent %s (revoked %d credentials)", name, len(creds))
 
 	w.WriteHeader(http.StatusNoContent)
 }
