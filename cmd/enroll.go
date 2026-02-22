@@ -21,11 +21,12 @@ var enrollCmd = &cobra.Command{
 the request before this machine can request credentials.
 
 Example:
-  creddy enroll http://creddy-server:8400 --name my-agent`,
+  creddy enroll http://creddy-server:8400 --name my-agent --can github:read,write`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := args[0]
 		name, _ := cmd.Flags().GetString("name")
+		scopes, _ := cmd.Flags().GetStringSlice("can")
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 		timeout, _ := cmd.Flags().GetDuration("timeout")
 
@@ -36,9 +37,12 @@ Example:
 		}
 
 		fmt.Printf("Requesting enrollment as '%s' from %s...\n", name, serverURL)
+		if len(scopes) > 0 {
+			fmt.Printf("Requested permissions: %v\n", scopes)
+		}
 
 		// Submit enrollment request
-		reqBody, _ := json.Marshal(map[string]string{"name": name})
+		reqBody, _ := json.Marshal(map[string]interface{}{"name": name, "scopes": scopes})
 		resp, err := http.Post(serverURL+"/v1/enroll", "application/json", bytes.NewReader(reqBody))
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
@@ -169,6 +173,7 @@ var pendingCmd = &cobra.Command{
 		var pending []struct {
 			ID        string    `json:"id"`
 			Name      string    `json:"name"`
+			Scopes    string    `json:"scopes"`
 			CreatedAt time.Time `json:"created_at"`
 		}
 		if err := json.Unmarshal(body, &pending); err != nil {
@@ -180,10 +185,14 @@ var pendingCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-36s  %-20s  %s\n", "ID", "NAME", "REQUESTED")
-		fmt.Println("------------------------------------  --------------------  --------------------")
+		fmt.Printf("%-36s  %-20s  %-30s  %s\n", "ID", "NAME", "REQUESTED SCOPES", "REQUESTED")
+		fmt.Println("------------------------------------  --------------------  ------------------------------  --------------------")
 		for _, p := range pending {
-			fmt.Printf("%-36s  %-20s  %s\n", p.ID, p.Name, p.CreatedAt.Format(time.RFC3339))
+			scopes := p.Scopes
+			if scopes == "" || scopes == "[]" || scopes == "null" {
+				scopes = "(none)"
+			}
+			fmt.Printf("%-36s  %-20s  %-30s  %s\n", p.ID, p.Name, scopes, p.CreatedAt.Format(time.RFC3339))
 		}
 
 		return nil
@@ -262,8 +271,7 @@ func init() {
 	rootCmd.AddCommand(rejectCmd)
 
 	enrollCmd.Flags().StringP("name", "n", "", "Agent name (default: hostname)")
+	enrollCmd.Flags().StringSlice("can", []string{}, "Permissions to request (e.g., github:read,write)")
 	enrollCmd.Flags().Duration("poll-interval", 2*time.Second, "How often to poll for approval")
 	enrollCmd.Flags().Duration("timeout", 5*time.Minute, "Timeout waiting for approval (0 = forever)")
-
-	approveCmd.Flags().StringSlice("can", []string{}, "Scopes to grant (e.g., github:read,write)")
 }

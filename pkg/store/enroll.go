@@ -41,11 +41,11 @@ func (s *Store) migrateEnroll() error {
 }
 
 // CreatePendingEnrollment creates a new enrollment request
-func (s *Store) CreatePendingEnrollment(name, secret string) (*PendingEnrollment, error) {
+func (s *Store) CreatePendingEnrollment(name, secret, scopes string) (*PendingEnrollment, error) {
 	id := uuid.New().String()
 	_, err := s.db.Exec(
-		`INSERT INTO pending_enrollments (id, name, secret, status) VALUES (?, ?, ?, 'pending')`,
-		id, name, secret,
+		`INSERT INTO pending_enrollments (id, name, secret, status, scopes) VALUES (?, ?, ?, 'pending', ?)`,
+		id, name, secret, scopes,
 	)
 	if err != nil {
 		return nil, err

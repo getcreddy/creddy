@@ -589,7 +589,8 @@ func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name string `json:"name"`
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -603,14 +604,15 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a secret for the client to poll with
 	secret := generateToken()
+	scopesJSON, _ := json.Marshal(req.Scopes)
 
-	enrollment, err := s.store.CreatePendingEnrollment(req.Name, secret)
+	enrollment, err := s.store.CreatePendingEnrollment(req.Name, secret, string(scopesJSON))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create enrollment: "+err.Error())
 		return
 	}
 
-	log.Printf("New enrollment request: %s (%s)", req.Name, enrollment.ID)
+	log.Printf("New enrollment request: %s (%s) scopes=%v", req.Name, enrollment.ID, req.Scopes)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id":     enrollment.ID,
@@ -673,6 +675,7 @@ func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
 		results[i] = map[string]interface{}{
 			"id":         e.ID,
 			"name":       e.Name,
+			"scopes":     e.Scopes,
 			"created_at": e.CreatedAt,
 		}
 	}
@@ -682,12 +685,6 @@ func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-
-	var req struct {
-		Scopes []string `json:"scopes"`
-	}
-	// Scopes are optional in body
-	json.NewDecoder(r.Body).Decode(&req)
 
 	// Get the enrollment
 	enrollment, err := s.store.GetPendingEnrollment(id)
@@ -703,10 +700,15 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 
 	// Generate token for the new agent
 	token := generateToken()
-	scopesJSON, _ := json.Marshal(req.Scopes)
+
+	// Use scopes from the enrollment request
+	scopesJSON := enrollment.Scopes
+	if scopesJSON == "" {
+		scopesJSON = "[]"
+	}
 
 	// Create the agent
-	agent, err := s.store.CreateAgent(enrollment.Name, hashToken(token), string(scopesJSON))
+	agent, err := s.store.CreateAgent(enrollment.Name, hashToken(token), scopesJSON)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
 		return
@@ -727,7 +729,7 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	s.store.ApproveEnrollment(id, token, string(scopesJSON))
 
 	// Audit log
-	details, _ := json.Marshal(map[string]interface{}{"scopes": req.Scopes, "enrollment_id": id})
+	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_enrolled", "", string(details), "", r.RemoteAddr)
 
 	log.Printf("Approved enrollment: %s -> agent %s", enrollment.Name, agent.ID)
