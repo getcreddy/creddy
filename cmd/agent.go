@@ -114,40 +114,10 @@ var agentListCmd = &cobra.Command{
 	},
 }
 
-var agentRevokeCmd = &cobra.Command{
-	Use:   "revoke [name]",
-	Short: "Revoke an agent's token",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		name := args[0]
-
-		serverURL := viper.GetString("admin.url")
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400"
-		}
-
-		req, _ := http.NewRequest("DELETE", serverURL+"/v1/admin/agents/"+name, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to connect to server: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
-		}
-
-		fmt.Printf("Agent revoked: %s\n", name)
-		return nil
-	},
-}
-
 func init() {
 	rootCmd.AddCommand(agentCmd)
 	agentCmd.AddCommand(agentCreateCmd)
 	agentCmd.AddCommand(agentListCmd)
-	agentCmd.AddCommand(agentRevokeCmd)
 
 	agentCreateCmd.Flags().StringSlice("can", []string{}, "Scopes this agent can request (e.g., github:read,write)")
 }

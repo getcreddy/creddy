@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -60,14 +62,50 @@ func (g *GitHubBackend) GenerateJWT() (string, error) {
 }
 
 // GetInstallationToken generates an installation access token
-func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken, error) {
+// If repos is non-empty, the token is scoped to only those repositories
+// If readOnly is true, token gets read-only permissions
+func (g *GitHubBackend) GetInstallationToken(installationID int64, repos []string, readOnly bool) (*GitHubToken, error) {
 	jwtToken, err := g.GenerateJWT()
 	if err != nil {
 		return nil, err
 	}
 
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
-	req, err := http.NewRequest("POST", url, nil)
+
+	// Build request body
+	reqData := make(map[string]interface{})
+
+	if len(repos) > 0 {
+		// Scope token to specific repositories
+		// GitHub API wants just repo names, not owner/repo
+		repoNames := make([]string, len(repos))
+		for i, repo := range repos {
+			// Extract repo name from owner/repo format
+			parts := splitRepo(repo)
+			if len(parts) == 2 {
+				repoNames[i] = parts[1]
+			} else {
+				repoNames[i] = repo
+			}
+		}
+		reqData["repositories"] = repoNames
+	}
+
+	if readOnly {
+		// Request read-only permissions
+		reqData["permissions"] = map[string]string{
+			"contents": "read",
+			"metadata": "read",
+		}
+	}
+
+	var reqBody io.Reader
+	if len(reqData) > 0 {
+		bodyJSON, _ := json.Marshal(reqData)
+		reqBody = bytes.NewReader(bodyJSON)
+	}
+
+	req, err := http.NewRequest("POST", url, reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +113,9 @@ func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -100,6 +141,15 @@ func (g *GitHubBackend) GetInstallationToken(installationID int64) (*GitHubToken
 		Token:     result.Token,
 		ExpiresAt: result.ExpiresAt,
 	}, nil
+}
+
+func splitRepo(repo string) []string {
+	for i, c := range repo {
+		if c == '/' {
+			return []string{repo[:i], repo[i+1:]}
+		}
+	}
+	return []string{repo}
 }
 
 // ListInstallations returns all installations for this GitHub App
@@ -149,7 +199,8 @@ type Installation struct {
 
 // GetToken generates an ephemeral installation token
 // If installationID is 0, it will use the first installation found (or the configured one)
-func (g *GitHubBackend) GetToken(installationID int64) (*GitHubToken, error) {
+// If repos is non-empty, the token is scoped to only those repositories
+func (g *GitHubBackend) GetToken(installationID int64, repos []string, readOnly bool) (*GitHubToken, error) {
 	if installationID == 0 {
 		installationID = g.config.InstallationID
 	}
@@ -166,5 +217,103 @@ func (g *GitHubBackend) GetToken(installationID int64) (*GitHubToken, error) {
 		installationID = installations[0].ID
 	}
 
-	return g.GetInstallationToken(installationID)
+	return g.GetInstallationToken(installationID, repos, readOnly)
+}
+
+// ParseGitHubScope parses a scope like "github:owner/repo:read" into parts
+// Returns: repo pattern, permission (read/write), isGitHub
+func ParseGitHubScope(scope string) (pattern string, perm string, isGitHub bool) {
+	if !strings.HasPrefix(scope, "github:") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(scope, "github:")
+	
+	// Check for :read or :write suffix
+	if strings.HasSuffix(rest, ":read") {
+		return strings.TrimSuffix(rest, ":read"), "read", true
+	}
+	if strings.HasSuffix(rest, ":write") {
+		return strings.TrimSuffix(rest, ":write"), "write", true
+	}
+	
+	// Default to write
+	return rest, "write", true
+}
+
+// MatchesGitHubScope checks if requested repos/permissions are allowed by the scope
+// Scope format: "github:owner/repo[:read|:write]" or "github:owner/*" or "github:*"
+func MatchesGitHubScope(scope string, requestedRepos []string, requestedReadOnly bool) bool {
+	pattern, perm, isGitHub := ParseGitHubScope(scope)
+	if !isGitHub {
+		return false
+	}
+
+	// Check permission level: if scope is read-only, can't request write
+	if perm == "read" && !requestedReadOnly {
+		return false
+	}
+
+	// Wildcard - allow all repos
+	if pattern == "*" {
+		return true
+	}
+
+	// If no specific repos requested, scope matches
+	if len(requestedRepos) == 0 {
+		return true
+	}
+
+	for _, repo := range requestedRepos {
+		if !matchRepoPattern(pattern, repo) {
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractReposFromScopes extracts all repo patterns from github scopes
+// Returns list of repos and the most restrictive permission
+func ExtractReposFromScopes(scopes []string) (repos []string, readOnly bool) {
+	hasWrite := false
+	hasRead := false
+	
+	for _, scope := range scopes {
+		pattern, perm, isGitHub := ParseGitHubScope(scope)
+		if !isGitHub {
+			continue
+		}
+		
+		if perm == "write" {
+			hasWrite = true
+		} else {
+			hasRead = true
+		}
+		
+		// Skip wildcards - they mean "all repos"
+		if pattern == "*" || strings.HasSuffix(pattern, "/*") {
+			// Can't enumerate wildcard repos
+			continue
+		}
+		
+		repos = append(repos, pattern)
+	}
+	
+	// If only read scopes, force read-only
+	readOnly = hasRead && !hasWrite
+	return repos, readOnly
+}
+
+func matchRepoPattern(pattern, repo string) bool {
+	// Exact match
+	if pattern == repo {
+		return true
+	}
+
+	// Owner wildcard: "owner/*" matches "owner/anything"
+	if strings.HasSuffix(pattern, "/*") {
+		owner := strings.TrimSuffix(pattern, "/*")
+		return strings.HasPrefix(repo, owner+"/")
+	}
+
+	return false
 }

@@ -18,16 +18,18 @@ import (
 )
 
 type Server struct {
-	store    *store.Store
-	backends *backend.Manager
-	domain   string
-	ctx      context.Context
-	cancel   context.CancelFunc
+	store                *store.Store
+	backends             *backend.Manager
+	domain               string
+	agentInactivityLimit time.Duration
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 type Config struct {
-	DBPath string
-	Domain string // Domain for agent email addresses (e.g., creddy.dev)
+	DBPath               string
+	Domain               string        // Domain for agent email addresses (e.g., creddy.dev)
+	AgentInactivityLimit time.Duration // Auto-unenroll agents inactive for this long (0 = disabled)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -44,11 +46,12 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		store:    st,
-		backends: backend.NewManager(),
-		domain:   domain,
-		ctx:      ctx,
-		cancel:   cancel,
+		store:                st,
+		backends:             backend.NewManager(),
+		domain:               domain,
+		agentInactivityLimit: cfg.AgentInactivityLimit,
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 
 	// Load backends from database
@@ -56,8 +59,11 @@ func New(cfg Config) (*Server, error) {
 		log.Printf("Warning: failed to load backends: %v", err)
 	}
 
-	// Start the reaper
+	// Start the reapers
 	go s.reapExpiredCredentials()
+	if s.agentInactivityLimit > 0 {
+		go s.reapInactiveAgents()
+	}
 
 	return s, nil
 }
@@ -90,11 +96,63 @@ func (s *Server) reapExpiredCredentials() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			// Get expired credentials to revoke them first
+			expired, err := s.store.GetExpiredCredentials()
+			if err != nil {
+				log.Printf("Error getting expired credentials: %v", err)
+				continue
+			}
+
+			// Revoke from external backends
+			for _, cred := range expired {
+				if cred.ExternalID != "" {
+					s.revokeCredentialFromBackend(cred.Backend, cred.ExternalID)
+				}
+			}
+
+			// Delete from database
 			deleted, err := s.store.DeleteExpiredCredentials()
 			if err != nil {
 				log.Printf("Error reaping expired credentials: %v", err)
 			} else if deleted > 0 {
 				log.Printf("Reaped %d expired credentials", deleted)
+			}
+		}
+	}
+}
+
+// revokeCredentialFromBackend revokes a credential from the external service
+func (s *Server) revokeCredentialFromBackend(backendName, externalID string) {
+	b, err := s.backends.Get(backendName)
+	if err != nil {
+		log.Printf("Warning: backend %s not found for revocation", backendName)
+		return
+	}
+
+	if rb, ok := b.(backend.RevocableBackend); ok {
+		if err := rb.RevokeToken(externalID); err != nil {
+			log.Printf("Warning: failed to revoke %s token %s: %v", backendName, externalID, err)
+		} else {
+			log.Printf("Revoked %s token %s", backendName, externalID)
+		}
+	}
+}
+
+func (s *Server) reapInactiveAgents() {
+	// Check every hour
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := s.store.DeleteInactiveAgents(s.agentInactivityLimit)
+			if err != nil {
+				log.Printf("Error reaping inactive agents: %v", err)
+			} else if deleted > 0 {
+				log.Printf("Reaped %d inactive agents (no activity in %v)", deleted, s.agentInactivityLimit)
 			}
 		}
 	}
@@ -119,6 +177,16 @@ func (s *Server) Handler() http.Handler {
 	// Health check
 	mux.HandleFunc("GET /health", s.handleHealth)
 
+	// Enrollment (no auth - client initiates pairing)
+	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
+	mux.HandleFunc("GET /v1/enroll/status", s.handleEnrollStatus)
+
+	// Agent status (agent auth required)
+	mux.HandleFunc("GET /v1/status", s.handleAgentStatus)
+
+	// Scope requests (agent auth required)
+	mux.HandleFunc("POST /v1/request", s.handleScopeRequest)
+
 	// Credential endpoints (agent auth required)
 	mux.HandleFunc("POST /v1/credentials/{backend}", s.handleGetCredential)
 
@@ -136,6 +204,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/backends/{name}", s.handleDeleteBackend)
 	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleListPublicKeys)
+	mux.HandleFunc("GET /v1/admin/pending", s.handleListPending)
+	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
+	mux.HandleFunc("POST /v1/admin/pending/{id}/reject", s.handleRejectPending)
 
 	// Enrollment endpoints (new PKI-based auth)
 	s.RegisterEnrollmentRoutes(mux)
@@ -171,9 +242,23 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check agent has permission for this backend
-	if !agentCanAccessBackend(agent, backendName) {
-		writeError(w, http.StatusForbidden, "agent not authorized for this backend")
+	// Parse agent scopes
+	var agentScopes []string
+	json.Unmarshal([]byte(agent.Scopes), &agentScopes)
+
+	// Parse repos from query params (can be specified multiple times)
+	// If no repos specified, use all repos from agent's scopes
+	repos := r.URL.Query()["repo"]
+	readOnly := r.URL.Query().Get("read_only") == "true"
+
+	if len(repos) == 0 && backendName == "github" {
+		// Extract repos from agent's scopes
+		repos, _ = backend.ExtractReposFromScopes(agentScopes)
+	}
+
+	// Check agent has permission for this backend and repos
+	if !agentCanAccessBackend(agent, backendName, repos, readOnly) {
+		writeError(w, http.StatusForbidden, "agent not authorized for this backend/repos")
 		return
 	}
 
@@ -196,7 +281,21 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate credential
-	cred, err := b.GetToken(0) // TODO: support installation ID parameter
+	var cred *backend.Token
+	var externalID string
+
+	// Check if backend supports revocation (like Anthropic)
+	if rb, ok := b.(backend.RevocableBackend); ok {
+		cred, externalID, err = rb.GetTokenWithID(backend.TokenRequest{
+			Repos:    repos,
+			ReadOnly: readOnly,
+		})
+	} else {
+		cred, err = b.GetToken(backend.TokenRequest{
+			Repos:    repos,
+			ReadOnly: readOnly,
+		})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate credential: "+err.Error())
 		return
@@ -211,7 +310,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 
 	// Record the active credential
 	scopes := r.URL.Query().Get("scope")
-	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), scopes, expiresAt)
+	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), externalID, scopes, expiresAt)
 	if err != nil {
 		log.Printf("Warning: failed to record credential: %v", err)
 	}
@@ -228,6 +327,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		"ttl":        ttl.String(),
 		"expires_at": expiresAt,
 		"scopes":     scopes,
+		"repos":      repos,
 	})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "token_issued", backendName, string(details), tokenID, r.RemoteAddr)
 
@@ -387,10 +487,37 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
+	// Get agent to find their credentials
+	agent, err := s.store.GetAgentByName(name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+
+	// Revoke all active credentials from backends
+	creds, err := s.store.GetAllCredentialsByAgent(agent.ID)
+	if err != nil {
+		log.Printf("Warning: failed to get credentials for agent %s: %v", name, err)
+	} else {
+		for _, cred := range creds {
+			if cred.ExternalID != "" {
+				s.revokeCredentialFromBackend(cred.Backend, cred.ExternalID)
+			}
+		}
+	}
+
+	// Delete credentials from database
+	if err := s.store.DeleteAllCredentialsByAgent(agent.ID); err != nil {
+		log.Printf("Warning: failed to delete credentials for agent %s: %v", name, err)
+	}
+
+	// Delete the agent
 	if err := s.store.DeleteAgent(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete agent")
 		return
 	}
+
+	log.Printf("Unenrolled agent %s (revoked %d credentials)", name, len(creds))
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -581,6 +708,357 @@ func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// Agent self-service endpoints
+
+func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		return
+	}
+
+	// Get active credentials
+	creds, err := s.store.ListActiveCredentialsByAgent(agent.ID)
+	if err != nil {
+		creds = nil // Non-fatal
+	}
+
+	activeCreds := make([]map[string]interface{}, len(creds))
+	for i, c := range creds {
+		activeCreds[i] = map[string]interface{}{
+			"id":         c.ID,
+			"backend":    c.Backend,
+			"expires_at": c.ExpiresAt,
+		}
+	}
+
+	// Get pending amendments
+	pendingAmendments, err := s.store.ListPendingAmendmentsByAgent(agent.ID)
+	if err != nil {
+		pendingAmendments = nil // Non-fatal
+	}
+
+	amendments := make([]map[string]interface{}, len(pendingAmendments))
+	for i, a := range pendingAmendments {
+		var scopes []string
+		json.Unmarshal([]byte(a.Scopes), &scopes)
+		amendments[i] = map[string]interface{}{
+			"id":         a.ID,
+			"scopes":     scopes,
+			"created_at": a.CreatedAt,
+		}
+	}
+
+	// Parse scopes
+	var scopes []string
+	json.Unmarshal([]byte(agent.Scopes), &scopes)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"name":               agent.Name,
+		"status":             "enrolled",
+		"scopes":             scopes,
+		"created_at":         agent.CreatedAt,
+		"last_used":          agent.LastUsed,
+		"active_credentials": activeCreds,
+		"pending_amendments": amendments,
+	})
+}
+
+// Enrollment endpoints
+
+func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	// Check if agent with this name already exists
+	existing, _ := s.store.GetAgentByName(req.Name)
+	if existing != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("agent '%s' already exists. Use 'creddy request' to add scopes, or ask admin to run 'creddy unenroll %s'", req.Name, req.Name))
+		return
+	}
+
+	// Generate a secret for the client to poll with
+	secret := generateToken()
+	scopesJSON, _ := json.Marshal(req.Scopes)
+
+	enrollment, err := s.store.CreatePendingEnrollment(req.Name, secret, string(scopesJSON))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create enrollment: "+err.Error())
+		return
+	}
+
+	log.Printf("New enrollment request: %s (%s) scopes=%v", req.Name, enrollment.ID, req.Scopes)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     enrollment.ID,
+		"secret": secret, // Client uses this to poll
+		"status": "pending",
+	})
+}
+
+func (s *Server) handleScopeRequest(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		return
+	}
+
+	var req struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.Scopes) == 0 {
+		writeError(w, http.StatusBadRequest, "scopes required")
+		return
+	}
+
+	scopesJSON, _ := json.Marshal(req.Scopes)
+	amendment, err := s.store.CreateScopeAmendment(agent.ID, agent.Name, string(scopesJSON))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create scope request: "+err.Error())
+		return
+	}
+
+	log.Printf("Scope request from %s: %v", agent.Name, req.Scopes)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     amendment.ID,
+		"status": "pending",
+	})
+}
+
+func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
+	secret := r.URL.Query().Get("secret")
+	if secret == "" {
+		writeError(w, http.StatusBadRequest, "secret is required")
+		return
+	}
+
+	enrollment, err := s.store.GetPendingEnrollmentBySecret(secret)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	response := map[string]interface{}{
+		"id":     enrollment.ID,
+		"name":   enrollment.Name,
+		"status": enrollment.Status,
+	}
+
+	// If approved, return the token (only works once - client should save it)
+	if enrollment.Status == "approved" && enrollment.Token != "" {
+		// Get the agent that was created
+		agent, err := s.store.GetAgentByTokenHash(enrollment.Token)
+		if err == nil {
+			// Generate the actual token to return (we stored the hash)
+			// Actually, we need to store the token temporarily for pickup
+			// Let's return it from a separate field we'll add
+		}
+		_ = agent // TODO: include agent info
+
+		// For now, the token was stored as hash - we need to change approach
+		// Store the actual token encrypted or in a pickup field
+		response["token"] = enrollment.Token
+		response["scopes"] = enrollment.Scopes
+
+		// Delete the enrollment after token pickup
+		s.store.DeletePendingEnrollment(enrollment.ID)
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
+	enrollments, err := s.store.ListPendingEnrollments()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pending enrollments")
+		return
+	}
+
+	results := make([]map[string]interface{}, len(enrollments))
+	for i, e := range enrollments {
+		reqType := "enroll"
+		if e.IsAmendment() {
+			reqType = "amendment"
+		}
+		results[i] = map[string]interface{}{
+			"id":         e.ID,
+			"name":       e.Name,
+			"type":       reqType,
+			"scopes":     e.Scopes,
+			"created_at": e.CreatedAt,
+		}
+	}
+
+	json.NewEncoder(w).Encode(results)
+}
+
+func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	// Get the enrollment
+	enrollment, err := s.store.GetPendingEnrollment(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	if enrollment.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "enrollment already processed")
+		return
+	}
+
+	// Handle amendment vs new enrollment
+	if enrollment.IsAmendment() {
+		// Amendment: merge new scopes with existing agent scopes
+		agent, err := s.store.GetAgentByID(enrollment.AgentID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to find agent: "+err.Error())
+			return
+		}
+
+		// Merge scopes
+		var existingScopes, newScopes []string
+		json.Unmarshal([]byte(agent.Scopes), &existingScopes)
+		json.Unmarshal([]byte(enrollment.Scopes), &newScopes)
+
+		// Add new scopes (avoid duplicates)
+		scopeSet := make(map[string]bool)
+		for _, sc := range existingScopes {
+			scopeSet[sc] = true
+		}
+		for _, sc := range newScopes {
+			scopeSet[sc] = true
+		}
+		mergedScopes := make([]string, 0, len(scopeSet))
+		for sc := range scopeSet {
+			mergedScopes = append(mergedScopes, sc)
+		}
+
+		mergedJSON, _ := json.Marshal(mergedScopes)
+		if err := s.store.UpdateAgentScopes(agent.ID, string(mergedJSON)); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update scopes: "+err.Error())
+			return
+		}
+
+		// Mark enrollment as approved (no token needed for amendments)
+		s.store.ApproveAgentEnrollment(id, "", string(mergedJSON))
+
+		// Audit log
+		details, _ := json.Marshal(map[string]interface{}{
+			"added_scopes": newScopes,
+			"final_scopes": mergedScopes,
+		})
+		s.store.LogAuditEvent(agent.ID, agent.Name, "scopes_amended", "", string(details), "", r.RemoteAddr)
+
+		log.Printf("Approved scope amendment for %s: added %v", agent.Name, newScopes)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":       agent.ID,
+			"name":     agent.Name,
+			"type":     "amendment",
+			"scopes":   mergedScopes,
+			"approved": true,
+		})
+		return
+	}
+
+	// New enrollment: create agent
+	token := generateToken()
+
+	// Use scopes from the enrollment request
+	scopesJSON := enrollment.Scopes
+	if scopesJSON == "" {
+		scopesJSON = "[]"
+	}
+
+	// Create the agent
+	agent, err := s.store.CreateAgent(enrollment.Name, hashToken(token), scopesJSON)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
+		return
+	}
+
+	// Generate GPG signing key for the agent
+	keyPair, err := signing.GenerateKeyPair(enrollment.Name, s.domain)
+	if err != nil {
+		log.Printf("Warning: failed to generate signing key for agent %s: %v", enrollment.Name, err)
+	} else {
+		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
+		if err != nil {
+			log.Printf("Warning: failed to store signing key for agent %s: %v", enrollment.Name, err)
+		}
+	}
+
+	// Update enrollment with the token (not hashed - client needs to pick it up)
+	s.store.ApproveAgentEnrollment(id, token, scopesJSON)
+
+	// Audit log
+	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})
+	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_enrolled", "", string(details), "", r.RemoteAddr)
+
+	log.Printf("Approved enrollment: %s -> agent %s", enrollment.Name, agent.ID)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":       agent.ID,
+		"name":     agent.Name,
+		"type":     "enroll",
+		"approved": true,
+	})
+}
+
+func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	enrollment, err := s.store.GetPendingEnrollment(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	if enrollment.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "enrollment already processed")
+		return
+	}
+
+	if err := s.store.RejectEnrollment(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reject enrollment")
+		return
+	}
+
+	log.Printf("Rejected enrollment: %s", enrollment.Name)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Helpers
 
 func extractBearerToken(r *http.Request) string {
@@ -612,20 +1090,50 @@ func generateToken() string {
 	return "ckr_" + hex.EncodeToString(b)
 }
 
-func agentCanAccessBackend(agent *store.Agent, backendName string) bool {
+func agentCanAccessBackend(agent *store.Agent, backendName string, repos []string, readOnly bool) bool {
 	// Parse agent scopes
 	var scopes []string
 	json.Unmarshal([]byte(agent.Scopes), &scopes)
 
-	// Check if any scope matches
+	// No scopes means access to all (for backwards compatibility during dev)
+	if len(scopes) == 0 {
+		return true
+	}
+
+	// For GitHub, check each repo against scopes
+	if backendName == "github" {
+		// Each requested repo must be allowed by at least one scope
+		for _, repo := range repos {
+			allowed := false
+			for _, scope := range scopes {
+				if backend.MatchesGitHubScope(scope, []string{repo}, readOnly) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return false
+			}
+		}
+		// If no repos specified, check if any github scope exists
+		if len(repos) == 0 {
+			for _, scope := range scopes {
+				if strings.HasPrefix(scope, "github:") {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+
+	// For other backends, just check backend name
 	for _, scope := range scopes {
-		// Scope format: "backend:permission" or just "backend"
 		parts := strings.SplitN(scope, ":", 2)
 		if parts[0] == backendName || parts[0] == "*" {
 			return true
 		}
 	}
 
-	// No scopes means access to all (for backwards compatibility during dev)
-	return len(scopes) == 0
+	return false
 }

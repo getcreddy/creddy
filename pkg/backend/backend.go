@@ -11,12 +11,28 @@ type Token struct {
 	ExpiresAt time.Time
 }
 
+// TokenRequest contains parameters for requesting a token
+type TokenRequest struct {
+	InstallationID int64    // GitHub: installation ID
+	Repos          []string // GitHub: list of owner/repo to scope token to
+	ReadOnly       bool     // Request read-only permissions
+}
+
 // Backend is the interface that all credential backends must implement
 type Backend interface {
 	// GetToken generates a new ephemeral token
-	GetToken(installationID int64) (*Token, error)
+	GetToken(req TokenRequest) (*Token, error)
 	// Type returns the backend type (e.g., "github", "aws")
 	Type() string
+}
+
+// RevocableBackend is for backends that support explicit token revocation
+type RevocableBackend interface {
+	Backend
+	// GetTokenWithID returns token + external ID for later revocation
+	GetTokenWithID(req TokenRequest) (*Token, string, error)
+	// RevokeToken revokes a token by its external ID
+	RevokeToken(externalID string) error
 }
 
 // GitHubBackendWrapper wraps GitHubBackend to implement Backend interface
@@ -24,8 +40,8 @@ type GitHubBackendWrapper struct {
 	*GitHubBackend
 }
 
-func (g *GitHubBackendWrapper) GetToken(installationID int64) (*Token, error) {
-	token, err := g.GitHubBackend.GetToken(installationID)
+func (g *GitHubBackendWrapper) GetToken(req TokenRequest) (*Token, error) {
+	token, err := g.GitHubBackend.GetToken(req.InstallationID, req.Repos, req.ReadOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +95,12 @@ func LoadFromConfig(backendType, configJSON string) (Backend, error) {
 			return nil, err
 		}
 		return &GitHubBackendWrapper{gb}, nil
+	case "anthropic":
+		ab, err := NewAnthropic(configJSON)
+		if err != nil {
+			return nil, err
+		}
+		return ab, nil
 	default:
 		return nil, fmt.Errorf("unknown backend type: %s", backendType)
 	}
