@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/marccampbell/creddy/pkg/server"
 	"github.com/spf13/cobra"
@@ -34,12 +35,19 @@ var serverCmd = &cobra.Command{
 			domain = "creddy.local"
 		}
 
+		agentInactivityDays := viper.GetInt("server.agent_inactivity_days")
+		var agentInactivityLimit time.Duration
+		if agentInactivityDays > 0 {
+			agentInactivityLimit = time.Duration(agentInactivityDays) * 24 * time.Hour
+		}
+
 		// Ensure directory exists
 		os.MkdirAll(filepath.Dir(dbPath), 0700)
 
 		srv, err := server.New(server.Config{
-			DBPath: dbPath,
-			Domain: domain,
+			DBPath:               dbPath,
+			Domain:               domain,
+			AgentInactivityLimit: agentInactivityLimit,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to start server: %w", err)
@@ -59,6 +67,9 @@ var serverCmd = &cobra.Command{
 
 		fmt.Printf("Starting creddy server on %s\n", listen)
 		fmt.Printf("Database: %s\n", dbPath)
+		if agentInactivityLimit > 0 {
+			fmt.Printf("Agent inactivity limit: %v\n", agentInactivityLimit)
+		}
 		return http.ListenAndServe(listen, srv.Handler())
 	},
 }
@@ -68,7 +79,9 @@ func init() {
 	serverCmd.Flags().String("listen", "127.0.0.1:8400", "Address to listen on")
 	serverCmd.Flags().String("db", "", "Database path")
 	serverCmd.Flags().String("domain", "creddy.local", "Domain for agent email addresses")
+	serverCmd.Flags().Int("agent-inactivity-days", 0, "Auto-unenroll agents inactive for this many days (0 = disabled)")
 	viper.BindPFlag("server.listen", serverCmd.Flags().Lookup("listen"))
 	viper.BindPFlag("database.path", serverCmd.Flags().Lookup("db"))
 	viper.BindPFlag("server.domain", serverCmd.Flags().Lookup("domain"))
+	viper.BindPFlag("server.agent_inactivity_days", serverCmd.Flags().Lookup("agent-inactivity-days"))
 }

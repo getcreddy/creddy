@@ -140,6 +140,18 @@ func (s *Store) GetAgentByID(id string) (*Agent, error) {
 	return &a, nil
 }
 
+func (s *Store) GetAgentByName(name string) (*Agent, error) {
+	var a Agent
+	err := s.db.QueryRow(
+		`SELECT id, name, token_hash, scopes, created_at, last_used FROM agents WHERE name = ?`,
+		name,
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed)
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (s *Store) GetAgentByTokenHash(hash string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
@@ -178,6 +190,21 @@ func (s *Store) UpdateAgentLastUsed(id string) error {
 func (s *Store) DeleteAgent(name string) error {
 	_, err := s.db.Exec(`DELETE FROM agents WHERE name = ?`, name)
 	return err
+}
+
+// DeleteInactiveAgents removes agents that haven't been used within the given duration
+// Uses last_used if set, otherwise falls back to created_at
+func (s *Store) DeleteInactiveAgents(inactivityLimit time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-inactivityLimit)
+	result, err := s.db.Exec(`
+		DELETE FROM agents 
+		WHERE (last_used IS NOT NULL AND last_used < ?) 
+		   OR (last_used IS NULL AND created_at < ?)
+	`, cutoff, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // Backend operations

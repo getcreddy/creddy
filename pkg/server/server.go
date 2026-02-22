@@ -18,16 +18,18 @@ import (
 )
 
 type Server struct {
-	store    *store.Store
-	backends *backend.Manager
-	domain   string
-	ctx      context.Context
-	cancel   context.CancelFunc
+	store                *store.Store
+	backends             *backend.Manager
+	domain               string
+	agentInactivityLimit time.Duration
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 type Config struct {
-	DBPath string
-	Domain string // Domain for agent email addresses (e.g., creddy.dev)
+	DBPath               string
+	Domain               string        // Domain for agent email addresses (e.g., creddy.dev)
+	AgentInactivityLimit time.Duration // Auto-unenroll agents inactive for this long (0 = disabled)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -44,11 +46,12 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		store:    st,
-		backends: backend.NewManager(),
-		domain:   domain,
-		ctx:      ctx,
-		cancel:   cancel,
+		store:                st,
+		backends:             backend.NewManager(),
+		domain:               domain,
+		agentInactivityLimit: cfg.AgentInactivityLimit,
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 
 	// Load backends from database
@@ -56,8 +59,11 @@ func New(cfg Config) (*Server, error) {
 		log.Printf("Warning: failed to load backends: %v", err)
 	}
 
-	// Start the reaper
+	// Start the reapers
 	go s.reapExpiredCredentials()
+	if s.agentInactivityLimit > 0 {
+		go s.reapInactiveAgents()
+	}
 
 	return s, nil
 }
@@ -95,6 +101,26 @@ func (s *Server) reapExpiredCredentials() {
 				log.Printf("Error reaping expired credentials: %v", err)
 			} else if deleted > 0 {
 				log.Printf("Reaped %d expired credentials", deleted)
+			}
+		}
+	}
+}
+
+func (s *Server) reapInactiveAgents() {
+	// Check every hour
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := s.store.DeleteInactiveAgents(s.agentInactivityLimit)
+			if err != nil {
+				log.Printf("Error reaping inactive agents: %v", err)
+			} else if deleted > 0 {
+				log.Printf("Reaped %d inactive agents (no activity in %v)", deleted, s.agentInactivityLimit)
 			}
 		}
 	}
@@ -620,6 +646,13 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	// Check if agent with this name already exists
+	existing, _ := s.store.GetAgentByName(req.Name)
+	if existing != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("agent '%s' already exists. Use 'creddy request' to add scopes, or ask admin to run 'creddy unenroll %s'", req.Name, req.Name))
 		return
 	}
 
