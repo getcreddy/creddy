@@ -103,6 +103,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateEnroll(); err != nil {
 		return err
 	}
+	if err := s.migrateClients(); err != nil {
+		return err
+	}
 
 	// Add external_id column if it doesn't exist (for revocable backends)
 	s.db.Exec(`ALTER TABLE active_credentials ADD COLUMN external_id TEXT`)

@@ -173,8 +173,8 @@ func (s *Store) ListPendingAmendmentsByAgent(agentID string) ([]*PendingEnrollme
 	return amendments, nil
 }
 
-// ApproveEnrollment approves an enrollment and creates the agent
-func (s *Store) ApproveEnrollment(id string, tokenHash string, scopes string) error {
+// ApproveAgentEnrollment approves a pending agent enrollment
+func (s *Store) ApproveAgentEnrollment(id string, tokenHash string, scopes string) error {
 	_, err := s.db.Exec(
 		`UPDATE pending_enrollments SET status = 'approved', token_hash = ?, scopes = ? WHERE id = ? AND status = 'pending'`,
 		tokenHash, scopes, id,

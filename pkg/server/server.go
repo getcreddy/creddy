@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/marccampbell/creddy/pkg/backend"
-	"github.com/marccampbell/creddy/pkg/signing"
-	"github.com/marccampbell/creddy/pkg/store"
+	"github.com/getcreddy/creddy/pkg/backend"
+	"github.com/getcreddy/creddy/pkg/signing"
+	"github.com/getcreddy/creddy/pkg/store"
 )
 
 type Server struct {
@@ -207,6 +207,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/pending", s.handleListPending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/reject", s.handleRejectPending)
+
+	// Enrollment endpoints (new PKI-based auth)
+	s.RegisterEnrollmentRoutes(mux)
 
 	return s.withMiddleware(mux)
 }
@@ -967,7 +970,7 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Mark enrollment as approved (no token needed for amendments)
-		s.store.ApproveEnrollment(id, "", string(mergedJSON))
+		s.store.ApproveAgentEnrollment(id, "", string(mergedJSON))
 
 		// Audit log
 		details, _ := json.Marshal(map[string]interface{}{
@@ -1016,7 +1019,7 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update enrollment with the token (not hashed - client needs to pick it up)
-	s.store.ApproveEnrollment(id, token, scopesJSON)
+	s.store.ApproveAgentEnrollment(id, token, scopesJSON)
 
 	// Audit log
 	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})

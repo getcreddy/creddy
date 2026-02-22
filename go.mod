@@ -1,4 +1,4 @@
-module github.com/marccampbell/creddy
+module github.com/getcreddy/creddy
 
 go 1.24.0
 
