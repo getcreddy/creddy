@@ -17,7 +17,8 @@ and allows the agent name to be reused.
 
 Example:
   creddy unenroll my-agent`,
-	Args: cobra.ExactArgs(1),
+	SilenceUsage: true,
+	Args:         cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 

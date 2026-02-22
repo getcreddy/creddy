@@ -11,6 +11,16 @@ import (
 	"github.com/spf13/viper"
 )
 
+func extractError(body []byte) string {
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
+		return errResp.Error
+	}
+	return string(body)
+}
+
 var getCmd = &cobra.Command{
 	Use:   "get [backend]",
 	Short: "Request credentials from a backend",
@@ -21,7 +31,8 @@ Examples:
   creddy get github --read-only                  # read-only token
   creddy get github --repo owner/repo            # token for specific repo
   creddy get github --repo owner/repo1 --repo owner/repo2`,
-	Args: cobra.ExactArgs(1),
+	SilenceUsage: true,
+	Args:         cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		backend := args[0]
 		ttl, _ := cmd.Flags().GetDuration("ttl")
@@ -67,7 +78,7 @@ Examples:
 		body, _ := io.ReadAll(resp.Body)
 
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", extractError(body))
 		}
 
 		if outputJSON {

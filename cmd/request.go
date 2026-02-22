@@ -11,6 +11,16 @@ import (
 	"github.com/spf13/viper"
 )
 
+func parseError(body []byte) string {
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
+		return errResp.Error
+	}
+	return string(body)
+}
+
 var requestCmd = &cobra.Command{
 	Use:   "request",
 	Short: "Request additional permissions",
@@ -20,6 +30,7 @@ must approve the request before the new permissions take effect.
 Example:
   creddy request --can github:owner/repo3
   creddy request --can github:owner/repo4:read`,
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scopes, _ := cmd.Flags().GetStringSlice("can")
 
@@ -56,7 +67,7 @@ Example:
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", parseError(body))
 		}
 
 		var result struct {

@@ -14,17 +14,38 @@ import (
 	"github.com/spf13/viper"
 )
 
+// parseServerError extracts error message from JSON response or returns raw body
+func parseServerError(body []byte) string {
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
+		return errResp.Error
+	}
+	return string(body)
+}
+
 var enrollCmd = &cobra.Command{
-	Use:   "enroll [server-url]",
+	Use:   "enroll",
 	Short: "Enroll this machine as an agent",
 	Long: `Request enrollment with a creddy server. The server admin must approve
 the request before this machine can request credentials.
 
 Example:
-  creddy enroll http://creddy-server:8400 --name my-agent --can github:read,write`,
-	Args: cobra.ExactArgs(1),
+  creddy enroll --server http://creddy-server:8400 --name my-agent --can github:read,write
+  
+  # Or with environment variable
+  export CREDDY_URL=http://creddy-server:8400
+  creddy enroll --name my-agent --can github:read,write`,
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		serverURL := args[0]
+		serverURL, _ := cmd.Flags().GetString("server")
+		if serverURL == "" {
+			serverURL = viper.GetString("url")
+		}
+		if serverURL == "" {
+			return fmt.Errorf("server URL required (--server or CREDDY_URL)")
+		}
 		name, _ := cmd.Flags().GetString("name")
 		scopes, _ := cmd.Flags().GetStringSlice("can")
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
@@ -51,7 +72,7 @@ Example:
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", parseServerError(body))
 		}
 
 		var enrollResp struct {
@@ -148,8 +169,9 @@ token: %s
 // Admin commands for managing pending enrollments
 
 var pendingCmd = &cobra.Command{
-	Use:   "pending",
-	Short: "List pending enrollment requests",
+	Use:          "pending",
+	Short:        "List pending enrollment requests",
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := viper.GetString("admin.url")
 		if serverURL == "" {
@@ -164,7 +186,7 @@ var pendingCmd = &cobra.Command{
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", parseServerError(body))
 		}
 
 		var pending []struct {
@@ -202,9 +224,10 @@ var pendingCmd = &cobra.Command{
 }
 
 var approveCmd = &cobra.Command{
-	Use:   "approve [id]",
-	Short: "Approve a pending enrollment request",
-	Args:  cobra.ExactArgs(1),
+	Use:          "approve [id]",
+	Short:        "Approve a pending enrollment request",
+	SilenceUsage: true,
+	Args:         cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
 		scopes, _ := cmd.Flags().GetStringSlice("can")
@@ -223,7 +246,7 @@ var approveCmd = &cobra.Command{
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", parseServerError(body))
 		}
 
 		var result struct {
@@ -239,9 +262,10 @@ var approveCmd = &cobra.Command{
 }
 
 var rejectCmd = &cobra.Command{
-	Use:   "reject [id]",
-	Short: "Reject a pending enrollment request",
-	Args:  cobra.ExactArgs(1),
+	Use:          "reject [id]",
+	Short:        "Reject a pending enrollment request",
+	SilenceUsage: true,
+	Args:         cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
 
@@ -258,7 +282,7 @@ var rejectCmd = &cobra.Command{
 
 		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s", parseServerError(body))
 		}
 
 		fmt.Println("✓ Enrollment rejected")
@@ -272,6 +296,7 @@ func init() {
 	rootCmd.AddCommand(approveCmd)
 	rootCmd.AddCommand(rejectCmd)
 
+	enrollCmd.Flags().StringP("server", "s", "", "Creddy server URL (or set CREDDY_URL)")
 	enrollCmd.Flags().StringP("name", "n", "", "Agent name (default: hostname)")
 	enrollCmd.Flags().StringSlice("can", []string{}, "Permissions to request (e.g., github:read,write)")
 	enrollCmd.Flags().Duration("poll-interval", 2*time.Second, "How often to poll for approval")
