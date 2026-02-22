@@ -16,6 +16,7 @@ type TokenRequest struct {
 	InstallationID int64    // GitHub: installation ID
 	Repos          []string // GitHub: list of owner/repo to scope token to
 	ReadOnly       bool     // Request read-only permissions
+	DopplerScopes  []string // Doppler: list of project/config scopes
 }
 
 // Backend is the interface that all credential backends must implement
@@ -101,6 +102,12 @@ func LoadFromConfig(backendType, configJSON string) (Backend, error) {
 			return nil, err
 		}
 		return ab, nil
+	case "doppler":
+		db, err := NewDoppler(configJSON)
+		if err != nil {
+			return nil, err
+		}
+		return db, nil
 	default:
 		return nil, fmt.Errorf("unknown backend type: %s", backendType)
 	}
