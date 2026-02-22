@@ -119,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 	// Health check
 	mux.HandleFunc("GET /health", s.handleHealth)
 
+	// Enrollment (no auth - client initiates pairing)
+	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
+	mux.HandleFunc("GET /v1/enroll/status", s.handleEnrollStatus)
+
 	// Credential endpoints (agent auth required)
 	mux.HandleFunc("POST /v1/credentials/{backend}", s.handleGetCredential)
 
@@ -136,6 +140,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/backends/{name}", s.handleDeleteBackend)
 	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleListPublicKeys)
+	mux.HandleFunc("GET /v1/admin/pending", s.handleListPending)
+	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
+	mux.HandleFunc("POST /v1/admin/pending/{id}/reject", s.handleRejectPending)
 
 	return s.withMiddleware(mux)
 }
@@ -576,6 +583,184 @@ func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(results)
+}
+
+// Enrollment endpoints
+
+func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	// Generate a secret for the client to poll with
+	secret := generateToken()
+
+	enrollment, err := s.store.CreatePendingEnrollment(req.Name, secret)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create enrollment: "+err.Error())
+		return
+	}
+
+	log.Printf("New enrollment request: %s (%s)", req.Name, enrollment.ID)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     enrollment.ID,
+		"secret": secret, // Client uses this to poll
+		"status": "pending",
+	})
+}
+
+func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
+	secret := r.URL.Query().Get("secret")
+	if secret == "" {
+		writeError(w, http.StatusBadRequest, "secret is required")
+		return
+	}
+
+	enrollment, err := s.store.GetPendingEnrollmentBySecret(secret)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	response := map[string]interface{}{
+		"id":     enrollment.ID,
+		"name":   enrollment.Name,
+		"status": enrollment.Status,
+	}
+
+	// If approved, return the token (only works once - client should save it)
+	if enrollment.Status == "approved" && enrollment.Token != "" {
+		// Get the agent that was created
+		agent, err := s.store.GetAgentByTokenHash(enrollment.Token)
+		if err == nil {
+			// Generate the actual token to return (we stored the hash)
+			// Actually, we need to store the token temporarily for pickup
+			// Let's return it from a separate field we'll add
+		}
+		_ = agent // TODO: include agent info
+
+		// For now, the token was stored as hash - we need to change approach
+		// Store the actual token encrypted or in a pickup field
+		response["token"] = enrollment.Token
+		response["scopes"] = enrollment.Scopes
+
+		// Delete the enrollment after token pickup
+		s.store.DeletePendingEnrollment(enrollment.ID)
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
+	enrollments, err := s.store.ListPendingEnrollments()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pending enrollments")
+		return
+	}
+
+	results := make([]map[string]interface{}, len(enrollments))
+	for i, e := range enrollments {
+		results[i] = map[string]interface{}{
+			"id":         e.ID,
+			"name":       e.Name,
+			"created_at": e.CreatedAt,
+		}
+	}
+
+	json.NewEncoder(w).Encode(results)
+}
+
+func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req struct {
+		Scopes []string `json:"scopes"`
+	}
+	// Scopes are optional in body
+	json.NewDecoder(r.Body).Decode(&req)
+
+	// Get the enrollment
+	enrollment, err := s.store.GetPendingEnrollment(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	if enrollment.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "enrollment already processed")
+		return
+	}
+
+	// Generate token for the new agent
+	token := generateToken()
+	scopesJSON, _ := json.Marshal(req.Scopes)
+
+	// Create the agent
+	agent, err := s.store.CreateAgent(enrollment.Name, hashToken(token), string(scopesJSON))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
+		return
+	}
+
+	// Generate GPG signing key for the agent
+	keyPair, err := signing.GenerateKeyPair(enrollment.Name, s.domain)
+	if err != nil {
+		log.Printf("Warning: failed to generate signing key for agent %s: %v", enrollment.Name, err)
+	} else {
+		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
+		if err != nil {
+			log.Printf("Warning: failed to store signing key for agent %s: %v", enrollment.Name, err)
+		}
+	}
+
+	// Update enrollment with the token (not hashed - client needs to pick it up)
+	s.store.ApproveEnrollment(id, token, string(scopesJSON))
+
+	// Audit log
+	details, _ := json.Marshal(map[string]interface{}{"scopes": req.Scopes, "enrollment_id": id})
+	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_enrolled", "", string(details), "", r.RemoteAddr)
+
+	log.Printf("Approved enrollment: %s -> agent %s", enrollment.Name, agent.ID)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":       agent.ID,
+		"name":     agent.Name,
+		"approved": true,
+	})
+}
+
+func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	enrollment, err := s.store.GetPendingEnrollment(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+
+	if enrollment.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "enrollment already processed")
+		return
+	}
+
+	if err := s.store.RejectEnrollment(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reject enrollment")
+		return
+	}
+
+	log.Printf("Rejected enrollment: %s", enrollment.Name)
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Helpers

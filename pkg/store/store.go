@@ -98,6 +98,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateKeys(); err != nil {
 		return err
 	}
+	if err := s.migrateEnroll(); err != nil {
+		return err
+	}
 
 	return nil
 }
