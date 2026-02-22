@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/getcreddy/creddy/pkg/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -43,6 +45,34 @@ var serverCmd = &cobra.Command{
 
 		// Ensure directory exists
 		os.MkdirAll(filepath.Dir(dbPath), 0700)
+
+		// Load plugins
+		pluginDir := viper.GetString("plugin.dir")
+		if pluginDir == "" {
+			if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
+				pluginDir = envDir
+			} else {
+				home, _ := os.UserHomeDir()
+				pluginDir = filepath.Join(home, ".creddy", "plugins")
+			}
+		}
+
+		pluginLoader := plugin.NewLoader(pluginDir)
+		if err := pluginLoader.LoadAllPlugins(); err != nil {
+			log.Printf("Warning: failed to load plugins: %v", err)
+		}
+
+		// Register plugin loader as the default
+		plugin.NewLoaderBridge(pluginLoader).Register()
+
+		// Log loaded plugins
+		loadedPlugins := pluginLoader.ListPlugins()
+		if len(loadedPlugins) > 0 {
+			fmt.Printf("Loaded %d plugins:\n", len(loadedPlugins))
+			for _, p := range loadedPlugins {
+				fmt.Printf("  - %s v%s\n", p.Info.Name, p.Info.Version)
+			}
+		}
 
 		srv, err := server.New(server.Config{
 			DBPath:               dbPath,

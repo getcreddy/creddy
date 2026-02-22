@@ -87,8 +87,17 @@ func (m *Manager) List() []string {
 	return names
 }
 
+// PluginLoader is an interface for loading plugins (to avoid circular imports)
+type PluginLoader interface {
+	LoadPlugin(name string) (Backend, error)
+}
+
+// DefaultPluginLoader is set by the server on startup
+var DefaultPluginLoader PluginLoader
+
 // LoadFromConfig creates a backend from stored config
 func LoadFromConfig(backendType, configJSON string) (Backend, error) {
+	// First try built-in backends
 	switch backendType {
 	case "github":
 		gb, err := NewGitHub(configJSON)
@@ -108,7 +117,21 @@ func LoadFromConfig(backendType, configJSON string) (Backend, error) {
 			return nil, err
 		}
 		return db, nil
-	default:
-		return nil, fmt.Errorf("unknown backend type: %s", backendType)
 	}
+
+	// Try loading from plugin
+	if DefaultPluginLoader != nil {
+		b, err := DefaultPluginLoader.LoadPlugin(backendType)
+		if err == nil {
+			// Configure the plugin backend
+			if pb, ok := b.(interface{ Configure(string) error }); ok {
+				if err := pb.Configure(configJSON); err != nil {
+					return nil, fmt.Errorf("failed to configure plugin: %w", err)
+				}
+			}
+			return b, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unknown backend type: %s", backendType)
 }
