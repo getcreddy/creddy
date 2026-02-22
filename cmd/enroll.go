@@ -136,13 +136,10 @@ func saveCredentials(serverURL, token string) error {
 
 	configFile := filepath.Join(configDir, "config.yaml")
 
-	// Simple YAML write
+	// Simple YAML write - flat keys match env vars (CREDDY_URL, CREDDY_TOKEN)
 	config := fmt.Sprintf(`# Creddy configuration
-server:
-  url: %s
-
-agent:
-  token: %s
+url: %s
+token: %s
 `, serverURL, token)
 
 	return os.WriteFile(configFile, []byte(config), 0600)
