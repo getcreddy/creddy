@@ -146,6 +146,33 @@ func (s *Store) UpdateAgentScopes(agentID, scopes string) error {
 	return err
 }
 
+// ListPendingAmendmentsByAgent lists pending scope requests for a specific agent
+func (s *Store) ListPendingAmendmentsByAgent(agentID string) ([]*PendingEnrollment, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, secret, status, scopes, agent_id, created_at FROM pending_enrollments 
+		 WHERE agent_id = ? AND status = 'pending' ORDER BY created_at`,
+		agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var amendments []*PendingEnrollment
+	for rows.Next() {
+		var e PendingEnrollment
+		var agID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &e.Scopes, &agID, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if agID.Valid {
+			e.AgentID = agID.String
+		}
+		amendments = append(amendments, &e)
+	}
+	return amendments, nil
+}
+
 // ApproveEnrollment approves an enrollment and creates the agent
 func (s *Store) ApproveEnrollment(id string, tokenHash string, scopes string) error {
 	_, err := s.db.Exec(

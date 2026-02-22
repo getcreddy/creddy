@@ -181,6 +181,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
 	mux.HandleFunc("GET /v1/enroll/status", s.handleEnrollStatus)
 
+	// Agent status (agent auth required)
+	mux.HandleFunc("GET /v1/status", s.handleAgentStatus)
+
 	// Scope requests (agent auth required)
 	mux.HandleFunc("POST /v1/request", s.handleScopeRequest)
 
@@ -700,6 +703,68 @@ func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(results)
+}
+
+// Agent self-service endpoints
+
+func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		return
+	}
+
+	// Get active credentials
+	creds, err := s.store.ListActiveCredentialsByAgent(agent.ID)
+	if err != nil {
+		creds = nil // Non-fatal
+	}
+
+	activeCreds := make([]map[string]interface{}, len(creds))
+	for i, c := range creds {
+		activeCreds[i] = map[string]interface{}{
+			"id":         c.ID,
+			"backend":    c.Backend,
+			"expires_at": c.ExpiresAt,
+		}
+	}
+
+	// Get pending amendments
+	pendingAmendments, err := s.store.ListPendingAmendmentsByAgent(agent.ID)
+	if err != nil {
+		pendingAmendments = nil // Non-fatal
+	}
+
+	amendments := make([]map[string]interface{}, len(pendingAmendments))
+	for i, a := range pendingAmendments {
+		var scopes []string
+		json.Unmarshal([]byte(a.Scopes), &scopes)
+		amendments[i] = map[string]interface{}{
+			"id":         a.ID,
+			"scopes":     scopes,
+			"created_at": a.CreatedAt,
+		}
+	}
+
+	// Parse scopes
+	var scopes []string
+	json.Unmarshal([]byte(agent.Scopes), &scopes)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"name":               agent.Name,
+		"status":             "enrolled",
+		"scopes":             scopes,
+		"created_at":         agent.CreatedAt,
+		"last_used":          agent.LastUsed,
+		"active_credentials": activeCreds,
+		"pending_amendments": amendments,
+	})
 }
 
 // Enrollment endpoints
