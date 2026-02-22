@@ -18,6 +18,7 @@ time-limited credentials to AI agents without exposing master secrets.
 
 Agents authenticate to Creddy, and Creddy issues ephemeral tokens
 for services like GitHub, AWS, and more.`,
+	SilenceErrors: true,
 }
 
 func Execute() {
