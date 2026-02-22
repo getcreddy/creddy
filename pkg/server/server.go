@@ -251,14 +251,20 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	repos := r.URL.Query()["repo"]
 	readOnly := r.URL.Query().Get("read_only") == "true"
 
+	// Extract scopes based on backend type
+	var dopplerScopes []string
 	if len(repos) == 0 && backendName == "github" {
 		// Extract repos from agent's scopes
 		repos, _ = backend.ExtractReposFromScopes(agentScopes)
 	}
+	if backendName == "doppler" {
+		// Extract Doppler scopes from agent's scopes
+		dopplerScopes = backend.ExtractDopplerScopesFromAgentScopes(agentScopes)
+	}
 
-	// Check agent has permission for this backend and repos
-	if !agentCanAccessBackend(agent, backendName, repos, readOnly) {
-		writeError(w, http.StatusForbidden, "agent not authorized for this backend/repos")
+	// Check agent has permission for this backend
+	if !agentCanAccessBackend(agent, backendName, repos, dopplerScopes, readOnly) {
+		writeError(w, http.StatusForbidden, "agent not authorized for this backend")
 		return
 	}
 
@@ -284,16 +290,18 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	var cred *backend.Token
 	var externalID string
 
-	// Check if backend supports revocation (like Anthropic)
+	// Check if backend supports revocation (like Anthropic, Doppler)
 	if rb, ok := b.(backend.RevocableBackend); ok {
 		cred, externalID, err = rb.GetTokenWithID(backend.TokenRequest{
-			Repos:    repos,
-			ReadOnly: readOnly,
+			Repos:         repos,
+			ReadOnly:      readOnly,
+			DopplerScopes: dopplerScopes,
 		})
 	} else {
 		cred, err = b.GetToken(backend.TokenRequest{
-			Repos:    repos,
-			ReadOnly: readOnly,
+			Repos:         repos,
+			ReadOnly:      readOnly,
+			DopplerScopes: dopplerScopes,
 		})
 	}
 	if err != nil {
@@ -1090,7 +1098,7 @@ func generateToken() string {
 	return "ckr_" + hex.EncodeToString(b)
 }
 
-func agentCanAccessBackend(agent *store.Agent, backendName string, repos []string, readOnly bool) bool {
+func agentCanAccessBackend(agent *store.Agent, backendName string, repos []string, dopplerScopes []string, readOnly bool) bool {
 	// Parse agent scopes
 	var scopes []string
 	json.Unmarshal([]byte(agent.Scopes), &scopes)
@@ -1127,7 +1135,34 @@ func agentCanAccessBackend(agent *store.Agent, backendName string, repos []strin
 		return true
 	}
 
-	// For other backends, just check backend name
+	// For Doppler, check each project/config against scopes
+	if backendName == "doppler" {
+		// Each requested scope must be allowed
+		for _, reqScope := range dopplerScopes {
+			allowed := false
+			for _, scope := range scopes {
+				if backend.MatchesDopplerScope(scope, reqScope, readOnly) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return false
+			}
+		}
+		// If no scopes specified, check if any doppler scope exists
+		if len(dopplerScopes) == 0 {
+			for _, scope := range scopes {
+				if strings.HasPrefix(scope, "doppler:") {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+
+	// For other backends (anthropic, etc), just check backend name
 	for _, scope := range scopes {
 		parts := strings.SplitN(scope, ":", 2)
 		if parts[0] == backendName || parts[0] == "*" {
