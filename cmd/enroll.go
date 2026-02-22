@@ -173,6 +173,7 @@ var pendingCmd = &cobra.Command{
 		var pending []struct {
 			ID        string    `json:"id"`
 			Name      string    `json:"name"`
+			Type      string    `json:"type"`
 			Scopes    string    `json:"scopes"`
 			CreatedAt time.Time `json:"created_at"`
 		}
@@ -181,18 +182,22 @@ var pendingCmd = &cobra.Command{
 		}
 
 		if len(pending) == 0 {
-			fmt.Println("No pending enrollment requests")
+			fmt.Println("No pending requests")
 			return nil
 		}
 
-		fmt.Printf("%-36s  %-20s  %-30s  %s\n", "ID", "NAME", "REQUESTED SCOPES", "REQUESTED")
-		fmt.Println("------------------------------------  --------------------  ------------------------------  --------------------")
+		fmt.Printf("%-36s  %-10s  %-16s  %-30s  %s\n", "ID", "TYPE", "NAME", "REQUESTED SCOPES", "REQUESTED")
+		fmt.Println("------------------------------------  ----------  ----------------  ------------------------------  --------------------")
 		for _, p := range pending {
 			scopes := p.Scopes
 			if scopes == "" || scopes == "[]" || scopes == "null" {
 				scopes = "(none)"
 			}
-			fmt.Printf("%-36s  %-20s  %-30s  %s\n", p.ID, p.Name, scopes, p.CreatedAt.Format(time.RFC3339))
+			reqType := p.Type
+			if reqType == "" {
+				reqType = "enroll"
+			}
+			fmt.Printf("%-36s  %-10s  %-16s  %-30s  %s\n", p.ID, reqType, p.Name, scopes, p.CreatedAt.Format(time.RFC3339))
 		}
 
 		return nil

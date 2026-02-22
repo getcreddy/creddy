@@ -15,6 +15,7 @@ type Token struct {
 type TokenRequest struct {
 	InstallationID int64    // GitHub: installation ID
 	Repos          []string // GitHub: list of owner/repo to scope token to
+	ReadOnly       bool     // Request read-only permissions
 }
 
 // Backend is the interface that all credential backends must implement
@@ -31,7 +32,7 @@ type GitHubBackendWrapper struct {
 }
 
 func (g *GitHubBackendWrapper) GetToken(req TokenRequest) (*Token, error) {
-	token, err := g.GitHubBackend.GetToken(req.InstallationID, req.Repos)
+	token, err := g.GitHubBackend.GetToken(req.InstallationID, req.Repos, req.ReadOnly)
 	if err != nil {
 		return nil, err
 	}

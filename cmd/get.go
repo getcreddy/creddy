@@ -17,8 +17,9 @@ var getCmd = &cobra.Command{
 	Long: `Request ephemeral credentials from a configured backend.
 
 Examples:
-  creddy get github --ttl 10m
-  creddy get github --repo owner/repo --ttl 10m
+  creddy get github                              # token for all your repos
+  creddy get github --read-only                  # read-only token
+  creddy get github --repo owner/repo            # token for specific repo
   creddy get github --repo owner/repo1 --repo owner/repo2`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,6 +27,7 @@ Examples:
 		ttl, _ := cmd.Flags().GetDuration("ttl")
 		scope, _ := cmd.Flags().GetStringSlice("scope")
 		repos, _ := cmd.Flags().GetStringSlice("repo")
+		readOnly, _ := cmd.Flags().GetBool("read-only")
 		outputJSON, _ := cmd.Flags().GetBool("json")
 
 		serverURL := viper.GetString("url")
@@ -45,6 +47,9 @@ Examples:
 		}
 		for _, r := range repos {
 			url += "&repo=" + r
+		}
+		if readOnly {
+			url += "&read_only=true"
 		}
 
 		req, err := http.NewRequest("POST", url, nil)
@@ -86,6 +91,7 @@ func init() {
 	rootCmd.AddCommand(getCmd)
 	getCmd.Flags().Duration("ttl", 10*time.Minute, "Time-to-live for the credential")
 	getCmd.Flags().StringSlice("scope", []string{}, "Requested scopes")
-	getCmd.Flags().StringSlice("repo", []string{}, "Repository to scope token to (owner/repo)")
+	getCmd.Flags().StringSlice("repo", []string{}, "Narrow to specific repo(s) (owner/repo)")
+	getCmd.Flags().Bool("read-only", false, "Request read-only permissions")
 	getCmd.Flags().Bool("json", false, "Output full response as JSON")
 }

@@ -14,7 +14,13 @@ type PendingEnrollment struct {
 	Status    string // pending, approved, rejected
 	Token     string // Set when approved (only returned once)
 	Scopes    string
+	AgentID   string // Set for amendments (existing agent requesting more scopes)
 	CreatedAt time.Time
+}
+
+// IsAmendment returns true if this is an amendment request for an existing agent
+func (p *PendingEnrollment) IsAmendment() bool {
+	return p.AgentID != ""
 }
 
 func (s *Store) migrateEnroll() error {
@@ -26,6 +32,7 @@ func (s *Store) migrateEnroll() error {
 			status TEXT DEFAULT 'pending',
 			token_hash TEXT,
 			scopes TEXT DEFAULT '[]',
+			agent_id TEXT,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pending_enrollments_secret ON pending_enrollments(secret)`,
@@ -37,6 +44,10 @@ func (s *Store) migrateEnroll() error {
 			return err
 		}
 	}
+	
+	// Add agent_id column if it doesn't exist (migration for existing DBs)
+	s.db.Exec(`ALTER TABLE pending_enrollments ADD COLUMN agent_id TEXT`)
+	
 	return nil
 }
 
@@ -53,19 +64,36 @@ func (s *Store) CreatePendingEnrollment(name, secret, scopes string) (*PendingEn
 	return s.GetPendingEnrollment(id)
 }
 
+// CreateScopeAmendment creates a request for additional scopes for an existing agent
+func (s *Store) CreateScopeAmendment(agentID, agentName, scopes string) (*PendingEnrollment, error) {
+	id := uuid.New().String()
+	// No secret needed - agent already has a token
+	_, err := s.db.Exec(
+		`INSERT INTO pending_enrollments (id, name, secret, status, scopes, agent_id) VALUES (?, ?, '', 'pending', ?, ?)`,
+		id, agentName, scopes, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetPendingEnrollment(id)
+}
+
 // GetPendingEnrollment gets an enrollment by ID
 func (s *Store) GetPendingEnrollment(id string) (*PendingEnrollment, error) {
 	var e PendingEnrollment
-	var tokenHash sql.NullString
+	var tokenHash, agentID sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, name, secret, status, token_hash, scopes, created_at FROM pending_enrollments WHERE id = ?`,
+		`SELECT id, name, secret, status, token_hash, scopes, agent_id, created_at FROM pending_enrollments WHERE id = ?`,
 		id,
-	).Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &tokenHash, &e.Scopes, &e.CreatedAt)
+	).Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &tokenHash, &e.Scopes, &agentID, &e.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if tokenHash.Valid {
 		e.Token = tokenHash.String
+	}
+	if agentID.Valid {
+		e.AgentID = agentID.String
 	}
 	return &e, nil
 }
@@ -90,7 +118,7 @@ func (s *Store) GetPendingEnrollmentBySecret(secret string) (*PendingEnrollment,
 // ListPendingEnrollments lists all pending enrollment requests
 func (s *Store) ListPendingEnrollments() ([]*PendingEnrollment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, secret, status, scopes, created_at FROM pending_enrollments WHERE status = 'pending' ORDER BY created_at`,
+		`SELECT id, name, secret, status, scopes, agent_id, created_at FROM pending_enrollments WHERE status = 'pending' ORDER BY created_at`,
 	)
 	if err != nil {
 		return nil, err
@@ -100,12 +128,22 @@ func (s *Store) ListPendingEnrollments() ([]*PendingEnrollment, error) {
 	var enrollments []*PendingEnrollment
 	for rows.Next() {
 		var e PendingEnrollment
-		if err := rows.Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &e.Scopes, &e.CreatedAt); err != nil {
+		var agentID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &e.Scopes, &agentID, &e.CreatedAt); err != nil {
 			return nil, err
+		}
+		if agentID.Valid {
+			e.AgentID = agentID.String
 		}
 		enrollments = append(enrollments, &e)
 	}
 	return enrollments, nil
+}
+
+// UpdateAgentScopes updates an agent's scopes (used for amendments)
+func (s *Store) UpdateAgentScopes(agentID, scopes string) error {
+	_, err := s.db.Exec(`UPDATE agents SET scopes = ? WHERE id = ?`, scopes, agentID)
+	return err
 }
 
 // ApproveEnrollment approves an enrollment and creates the agent
