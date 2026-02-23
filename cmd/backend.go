@@ -20,20 +20,21 @@ var backendCmd = &cobra.Command{
 }
 
 var backendAddCmd = &cobra.Command{
-	Use:   "add [type]",
+	Use:   "add <plugin-type>",
 	Short: "Add a credential backend",
-	Long: `Add a credential backend. Supported types:
-  - github: GitHub App for repository access`,
+	Long: `Add a credential backend using any installed plugin.
+
+Examples:
+  creddy backend add github --config '{"app_id": 123, "private_key_pem": "..."}'
+  creddy backend add anthropic --config '{"admin_key": "sk-admin-..."}'
+  creddy backend add aws --config-file ./aws-config.json
+  creddy backend add github --name github-work --config '{"app_id": 456, ...}'
+
+Use 'creddy plugin list' to see available plugins.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		backendType := args[0]
-
-		switch backendType {
-		case "github":
-			return addGitHubBackend(cmd)
-		default:
-			return fmt.Errorf("unknown backend type: %s", backendType)
-		}
+		pluginType := args[0]
+		return addBackend(cmd, pluginType)
 	},
 }
 
@@ -108,33 +109,43 @@ func init() {
 	backendCmd.AddCommand(backendListCmd)
 	backendCmd.AddCommand(backendRemoveCmd)
 
-	// GitHub backend flags
-	backendAddCmd.Flags().Int64("app-id", 0, "GitHub App ID")
-	backendAddCmd.Flags().String("private-key", "", "Path to GitHub App private key")
-	backendAddCmd.Flags().Int64("installation-id", 0, "GitHub App installation ID (optional)")
-	backendAddCmd.Flags().String("name", "", "Name for this backend (defaults to type)")
+	// Generic backend flags
+	backendAddCmd.Flags().StringP("config", "c", "", "JSON configuration for the backend")
+	backendAddCmd.Flags().StringP("config-file", "f", "", "Path to JSON file with backend configuration")
+	backendAddCmd.Flags().String("name", "", "Name for this backend instance (defaults to plugin type)")
 }
 
-func addGitHubBackend(cmd *cobra.Command) error {
-	appID, _ := cmd.Flags().GetInt64("app-id")
-	privateKeyPath, _ := cmd.Flags().GetString("private-key")
-	installationID, _ := cmd.Flags().GetInt64("installation-id")
+func addBackend(cmd *cobra.Command, pluginType string) error {
+	configJSON, _ := cmd.Flags().GetString("config")
+	configFile, _ := cmd.Flags().GetString("config-file")
 	name, _ := cmd.Flags().GetString("name")
 
-	if appID == 0 {
-		return fmt.Errorf("--app-id is required for GitHub backend")
+	// Validate that we have config from either flag
+	if configJSON == "" && configFile == "" {
+		return fmt.Errorf("either --config or --config-file is required")
 	}
-	if privateKeyPath == "" {
-		return fmt.Errorf("--private-key is required for GitHub backend")
-	}
-	if name == "" {
-		name = "github"
+	if configJSON != "" && configFile != "" {
+		return fmt.Errorf("cannot specify both --config and --config-file")
 	}
 
-	// Read private key
-	keyData, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read private key: %w", err)
+	// Read config from file if specified
+	if configFile != "" {
+		data, err := os.ReadFile(configFile)
+		if err != nil {
+			return fmt.Errorf("failed to read config file: %w", err)
+		}
+		configJSON = string(data)
+	}
+
+	// Validate that config is valid JSON
+	var configMap map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &configMap); err != nil {
+		return fmt.Errorf("invalid JSON config: %w", err)
+	}
+
+	// Default name to plugin type
+	if name == "" {
+		name = pluginType
 	}
 
 	serverURL := viper.GetString("admin.url")
@@ -142,18 +153,10 @@ func addGitHubBackend(cmd *cobra.Command) error {
 		serverURL = "http://127.0.0.1:8400"
 	}
 
-	config := map[string]interface{}{
-		"app_id":          appID,
-		"private_key_pem": string(keyData),
-	}
-	if installationID != 0 {
-		config["installation_id"] = installationID
-	}
-
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"type":   "github",
+		"type":   pluginType,
 		"name":   name,
-		"config": config,
+		"config": json.RawMessage(configJSON),
 	})
 
 	resp, err := http.Post(serverURL+"/v1/admin/backends", "application/json", bytes.NewReader(reqBody))
@@ -173,13 +176,10 @@ func addGitHubBackend(cmd *cobra.Command) error {
 		Name string `json:"name"`
 		Type string `json:"type"`
 	}
-	json.Unmarshal(body, &result)
-
-	fmt.Printf("GitHub backend added: %s\n", result.Name)
-	fmt.Printf("  App ID: %d\n", appID)
-	if installationID != 0 {
-		fmt.Printf("  Installation ID: %d\n", installationID)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	fmt.Printf("Backend added: %s (type: %s)\n", result.Name, result.Type)
 	return nil
 }
