@@ -3,7 +3,7 @@ module github.com/getcreddy/creddy
 go 1.24.0
 
 require (
-	github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223035836-0cafb6469018
+	github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223125356-fcb8eb5a1b91
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0

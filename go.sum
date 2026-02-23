@@ -14,8 +14,8 @@ github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHk
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
-github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223035836-0cafb6469018 h1:+EKQejMgLnOYXOrMOI1OigAM1CXePzw555JXHg6heXo=
-github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223035836-0cafb6469018/go.mod h1:con3+Jo9Hb3Yo1JOJcxzYN2bzYgV/gANfb24ZEX2n+s=
+github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223125356-fcb8eb5a1b91 h1:YIQ+kX0VDea/EY8PlSMDRIXKsKAfXDwdAZyobodhC98=
+github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223125356-fcb8eb5a1b91/go.mod h1:con3+Jo9Hb3Yo1JOJcxzYN2bzYgV/gANfb24ZEX2n+s=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-logr/stdr v1.2.2 h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=

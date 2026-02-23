@@ -122,7 +122,7 @@ func (pb *PluginBackend) GetTokenWithID(req backend.TokenRequest) (*backend.Toke
 	return &backend.Token{
 		Value:     cred.Value,
 		ExpiresAt: cred.ExpiresAt,
-	}, cred.ExternalID, nil
+	}, cred.Credential, nil // Credential is the token/key needed for revocation
 }
 
 // RevokeToken implements backend.RevocableBackend
