@@ -432,24 +432,31 @@ func installFromOCI(reference, pluginDir string) error {
 		shortHash = shortHash[:8]
 	}
 
+	// Extract plugin type from name (e.g., "creddy-github" -> "github")
+	pluginType := destName
+	if strings.HasPrefix(pluginType, "creddy-") {
+		pluginType = strings.TrimPrefix(pluginType, "creddy-")
+	}
+
 	if oldHash == newHash {
 		fmt.Printf("  Plugin unchanged (%s) for %s/%s\n", shortHash, runtime.GOOS, runtime.GOARCH)
 	} else if oldHash == "" {
 		fmt.Printf("  Installed %s (%s) for %s/%s\n", destName, shortHash, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("  Next: configure with 'creddy backend add %s'\n", pluginType)
 	} else {
 		oldShort := oldHash
 		if len(oldShort) > 8 {
 			oldShort = oldShort[:8]
 		}
 		fmt.Printf("  Updated %s (%s → %s) for %s/%s\n", destName, oldShort, shortHash, runtime.GOOS, runtime.GOARCH)
-	}
 
-	// Extract plugin type from name (e.g., "creddy-github" -> "github")
-	pluginType := destName
-	if strings.HasPrefix(pluginType, "creddy-") {
-		pluginType = strings.TrimPrefix(pluginType, "creddy-")
+		// Trigger reload on the server for upgraded plugins
+		if err := reloadPlugin(pluginType); err != nil {
+			fmt.Printf("  ⚠️  Could not reload plugin: %v (restart server manually)\n", err)
+		} else {
+			fmt.Printf("  ✓ Plugin reloaded\n")
+		}
 	}
-	fmt.Printf("  Next: configure with 'creddy backend add %s'\n", pluginType)
 
 	return nil
 }
@@ -812,6 +819,34 @@ func runPluginInfo(cmd *cobra.Command, args []string) error {
 		if constraints.Description != "" {
 			fmt.Printf("  Note:    %s\n", constraints.Description)
 		}
+	}
+
+	return nil
+}
+
+// reloadPlugin tells the server to reload a specific plugin
+func reloadPlugin(pluginName string) error {
+	serverURL := viper.GetString("admin.url")
+	if serverURL == "" {
+		serverURL = "http://127.0.0.1:8400"
+	}
+
+	url := fmt.Sprintf("%s/v1/admin/plugins/%s/reload", serverURL, pluginName)
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil

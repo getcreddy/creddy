@@ -196,6 +196,15 @@ func (l *Loader) UnloadPlugin(name string) error {
 	return nil
 }
 
+// ReloadPlugin stops and restarts a plugin (for upgrades)
+func (l *Loader) ReloadPlugin(name string) (*LoadedPlugin, error) {
+	// Unload if already loaded (ignore error if not loaded)
+	l.UnloadPlugin(name)
+
+	// Load the plugin fresh
+	return l.LoadPlugin(name)
+}
+
 // UnloadAll stops all plugins
 func (l *Loader) UnloadAll() {
 	l.mu.Lock()

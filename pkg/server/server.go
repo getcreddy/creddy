@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/backend"
-	"github.com/getcreddy/creddy/pkg/plugin"
+	pluginpkg "github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/getcreddy/creddy/pkg/signing"
 	"github.com/getcreddy/creddy/pkg/store"
 )
@@ -21,7 +21,7 @@ import (
 type Server struct {
 	store                *store.Store
 	backends             *backend.Manager
-	pluginLoader         *plugin.Loader
+	pluginLoader         *pluginpkg.Loader
 	domain               string
 	agentInactivityLimit time.Duration
 	ctx                  context.Context
@@ -32,7 +32,7 @@ type Config struct {
 	DBPath               string
 	Domain               string         // Domain for agent email addresses (e.g., creddy.dev)
 	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
-	PluginLoader         *plugin.Loader // Plugin loader for hot-reload support
+	PluginLoader         *pluginpkg.Loader // Plugin loader for hot-reload support
 }
 
 func New(cfg Config) (*Server, error) {
@@ -212,6 +212,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/reject", s.handleRejectPending)
 	mux.HandleFunc("POST /v1/admin/plugins/reload", s.handlePluginReload)
+	mux.HandleFunc("POST /v1/admin/plugins/{name}/reload", s.handlePluginReloadOne)
 
 	// Enrollment endpoints (new PKI-based auth)
 	s.RegisterEnrollmentRoutes(mux)
@@ -634,6 +635,39 @@ func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"loaded":  loaded,
 		"plugins": pluginNames,
+	})
+}
+
+func (s *Server) handlePluginReloadOne(w http.ResponseWriter, r *http.Request) {
+	if s.pluginLoader == nil {
+		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
+		return
+	}
+
+	pluginName := r.PathValue("name")
+	if pluginName == "" {
+		writeError(w, http.StatusBadRequest, "plugin name required")
+		return
+	}
+
+	// Reload the specific plugin (kills old process, starts new one)
+	loaded, err := s.pluginLoader.ReloadPlugin(pluginName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reload plugin: "+err.Error())
+		return
+	}
+
+	// Re-register the backend bridge
+	if s.backends != nil {
+		bridge := pluginpkg.NewPluginBackend(pluginName, loaded.Plugin)
+		s.backends.Register(pluginName, bridge)
+	}
+
+	log.Printf("Reloaded plugin: %s (version: %s)", loaded.Info.Name, loaded.Info.Version)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"reloaded": pluginName,
+		"version":  loaded.Info.Version,
 	})
 }
 
