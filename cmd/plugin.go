@@ -415,13 +415,35 @@ func installFromOCI(reference, pluginDir string) error {
 	}
 	destFile.Close()
 
+	// Get hash of new binary
+	newHash := hashFile(tmpPath)
+
+	// Get hash of existing binary (if any)
+	oldHash := hashFile(destPath)
+
 	// Atomic rename - works even if destination is busy
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to install plugin: %w", err)
 	}
 
-	fmt.Printf("  Installed %s for %s/%s\n", destName, runtime.GOOS, runtime.GOARCH)
+	shortHash := newHash
+	if len(shortHash) > 8 {
+		shortHash = shortHash[:8]
+	}
+
+	if oldHash == newHash {
+		fmt.Printf("  Plugin unchanged (%s) for %s/%s\n", shortHash, runtime.GOOS, runtime.GOARCH)
+	} else if oldHash == "" {
+		fmt.Printf("  Installed %s (%s) for %s/%s\n", destName, shortHash, runtime.GOOS, runtime.GOARCH)
+	} else {
+		oldShort := oldHash
+		if len(oldShort) > 8 {
+			oldShort = oldShort[:8]
+		}
+		fmt.Printf("  Updated %s (%s → %s) for %s/%s\n", destName, oldShort, shortHash, runtime.GOOS, runtime.GOARCH)
+	}
+
 	// Extract plugin type from name (e.g., "creddy-github" -> "github")
 	pluginType := destName
 	if strings.HasPrefix(pluginType, "creddy-") {
@@ -768,4 +790,19 @@ func runPluginInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// hashFile returns sha256 hash of a file, or empty string if file doesn't exist
+func hashFile(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
