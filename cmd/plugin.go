@@ -298,6 +298,22 @@ func installFromOCI(reference, pluginDir string) error {
 
 	fmt.Printf("  Pulled %s (digest: %s)\n", reference, desc.Digest.String()[:12])
 
+	// Debug: show what's in the temp directory
+	fmt.Printf("  Debug: temp dir = %s\n", tmpDir)
+	filepath.WalkDir(tmpDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(tmpDir, path)
+		info, _ := d.Info()
+		if info != nil {
+			fmt.Printf("  Debug: %s (size=%d, dir=%v)\n", rel, info.Size(), d.IsDir())
+		} else {
+			fmt.Printf("  Debug: %s (dir=%v)\n", rel, d.IsDir())
+		}
+		return nil
+	})
+
 	// Find and copy the binary from the pulled content
 	// ORAS pulls files to the temp directory - look for executables
 	entries, err := os.ReadDir(tmpDir)
