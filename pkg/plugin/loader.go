@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
@@ -23,6 +24,8 @@ type Loader struct {
 	plugins   map[string]*LoadedPlugin
 	mu        sync.RWMutex
 	logger    hclog.Logger
+	watcher   *fsnotify.Watcher
+	stopCh    chan struct{}
 }
 
 // LoadedPlugin represents a loaded and running plugin
@@ -227,4 +230,131 @@ func (l *Loader) findPluginBinary(name string) string {
 // PluginDir returns the plugin directory path
 func (l *Loader) PluginDir() string {
 	return l.pluginDir
+}
+
+// Watch starts watching the plugin directory for changes.
+// New plugins are automatically loaded, removed plugins are unloaded.
+// This method blocks until StopWatch is called or an error occurs.
+func (l *Loader) Watch() error {
+	// Ensure plugin directory exists
+	if err := os.MkdirAll(l.pluginDir, 0755); err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+
+	l.mu.Lock()
+	l.watcher = watcher
+	l.stopCh = make(chan struct{})
+	l.mu.Unlock()
+
+	if err := watcher.Add(l.pluginDir); err != nil {
+		watcher.Close()
+		return fmt.Errorf("failed to watch plugin directory: %w", err)
+	}
+
+	l.logger.Info("watching plugin directory for changes", "dir", l.pluginDir)
+
+	for {
+		select {
+		case <-l.stopCh:
+			return nil
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+			l.handleFsEvent(event)
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
+			l.logger.Error("watcher error", "error", err)
+		}
+	}
+}
+
+// handleFsEvent processes filesystem events for plugin hot-reload
+func (l *Loader) handleFsEvent(event fsnotify.Event) {
+	// Extract plugin name from path
+	filename := filepath.Base(event.Name)
+	name := strings.TrimPrefix(filename, "creddy-")
+
+	switch {
+	case event.Op&fsnotify.Create == fsnotify.Create:
+		// New file created - try to load it as a plugin
+		// Wait a moment for the file to be fully written
+		time.Sleep(100 * time.Millisecond)
+		
+		// Check if file is executable
+		info, err := os.Stat(event.Name)
+		if err != nil {
+			return
+		}
+		if info.Mode()&0111 == 0 {
+			// Not executable, skip
+			return
+		}
+
+		l.logger.Info("detected new plugin", "name", name)
+		if _, err := l.LoadPlugin(name); err != nil {
+			l.logger.Error("failed to load new plugin", "name", name, "error", err)
+		} else {
+			l.logger.Info("loaded new plugin", "name", name)
+		}
+
+	case event.Op&fsnotify.Remove == fsnotify.Remove:
+		// File removed - unload the plugin
+		l.mu.RLock()
+		_, loaded := l.plugins[name]
+		l.mu.RUnlock()
+
+		if loaded {
+			l.logger.Info("detected plugin removal", "name", name)
+			if err := l.UnloadPlugin(name); err != nil {
+				l.logger.Error("failed to unload plugin", "name", name, "error", err)
+			} else {
+				l.logger.Info("unloaded plugin", "name", name)
+			}
+		}
+
+	case event.Op&fsnotify.Write == fsnotify.Write:
+		// File modified - reload the plugin
+		l.mu.RLock()
+		_, loaded := l.plugins[name]
+		l.mu.RUnlock()
+
+		if loaded {
+			l.logger.Info("detected plugin update", "name", name)
+			// Unload first, then reload
+			if err := l.UnloadPlugin(name); err != nil {
+				l.logger.Error("failed to unload plugin for reload", "name", name, "error", err)
+				return
+			}
+			// Wait for process to fully terminate
+			time.Sleep(100 * time.Millisecond)
+			if _, err := l.LoadPlugin(name); err != nil {
+				l.logger.Error("failed to reload plugin", "name", name, "error", err)
+			} else {
+				l.logger.Info("reloaded plugin", "name", name)
+			}
+		}
+	}
+}
+
+// StopWatch stops the filesystem watcher
+func (l *Loader) StopWatch() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.stopCh != nil {
+		close(l.stopCh)
+		l.stopCh = nil
+	}
+	if l.watcher != nil {
+		l.watcher.Close()
+		l.watcher = nil
+	}
 }
