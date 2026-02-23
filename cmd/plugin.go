@@ -422,7 +422,12 @@ func installFromOCI(reference, pluginDir string) error {
 	}
 
 	fmt.Printf("  Installed %s for %s/%s\n", destName, runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("  Next: configure with 'creddy backend add %s --config {...}'\n", destName)
+	// Extract plugin type from name (e.g., "creddy-github" -> "github")
+	pluginType := destName
+	if strings.HasPrefix(pluginType, "creddy-") {
+		pluginType = strings.TrimPrefix(pluginType, "creddy-")
+	}
+	fmt.Printf("  Next: configure with 'creddy backend add %s'\n", pluginType)
 
 	return nil
 }
