@@ -314,15 +314,33 @@ func installFromOCI(reference, pluginDir string) error {
 		return nil
 	})
 
-	// Find and copy the binary from the pulled content
-	// ORAS pulls files to the temp directory - look for executables
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		return fmt.Errorf("failed to read pulled content: %w", err)
-	}
-
 	// Determine the current platform suffix (e.g., "linux-amd64", "darwin-arm64")
 	platformSuffix := fmt.Sprintf("-%s-%s", runtime.GOOS, runtime.GOARCH)
+
+	// Find and copy the binary from the pulled content
+	// ORAS may place files in subdirectories (e.g., bin/), so walk recursively
+	var platformBinary string
+	var platformBinaryPath string
+	var allBinaries []string
+
+	err = filepath.WalkDir(tmpDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		// Skip manifest and config files
+		if strings.HasSuffix(d.Name(), ".json") {
+			return nil
+		}
+		allBinaries = append(allBinaries, d.Name())
+		if strings.HasSuffix(d.Name(), platformSuffix) {
+			platformBinary = d.Name()
+			platformBinaryPath = path
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to scan pulled content: %w", err)
+	}
 
 	// Extract plugin name from reference (e.g., ttl.sh/creddy-github:1h -> creddy-github)
 	refParts := strings.Split(reference, "/")
@@ -331,25 +349,6 @@ func installFromOCI(reference, pluginDir string) error {
 		lastPart = lastPart[:colonIdx]
 	}
 	pluginName := lastPart
-
-	// Look for platform-specific binary first
-	var platformBinary string
-	var allBinaries []string
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		// Skip manifest and config files that ORAS creates
-		if strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		allBinaries = append(allBinaries, entry.Name())
-		// Check if this is the binary for our platform
-		if strings.HasSuffix(entry.Name(), platformSuffix) {
-			platformBinary = entry.Name()
-		}
-	}
 
 	if platformBinary == "" {
 		if len(allBinaries) == 0 {
@@ -360,7 +359,7 @@ func installFromOCI(reference, pluginDir string) error {
 			runtime.GOOS, runtime.GOARCH, strings.Join(allBinaries, ", "))
 	}
 
-	srcPath := filepath.Join(tmpDir, platformBinary)
+	srcPath := platformBinaryPath
 
 	// Determine destination name: strip platform suffix
 	// e.g., "creddy-github-linux-amd64" -> "creddy-github"
