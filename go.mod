@@ -3,13 +3,14 @@ module github.com/getcreddy/creddy
 go 1.24.0
 
 require (
-	github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260222200520-65977e882824
+	github.com/getcreddy/creddy-plugin-sdk v0.0.0-20260223033639-e09e89c176ce
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.48.0
+	golang.org/x/term v0.40.0
 	modernc.org/sqlite v1.46.1
 	oras.land/oras-go/v2 v2.6.0
 )
@@ -41,7 +42,6 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
