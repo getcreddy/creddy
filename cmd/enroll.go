@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,30 @@ func parseServerError(body []byte) string {
 		return errResp.Error
 	}
 	return string(body)
+}
+
+// formatEnrollError formats enrollment errors for better user experience
+func formatEnrollError(errMsg string) string {
+	// Check for unknown backend error and format it nicely
+	// Error format: unknown backend "foo" in scope "foo:bar" - available backends: a, b, c
+	if strings.Contains(errMsg, "unknown backend") {
+		// Extract backend name between first pair of quotes
+		start := strings.Index(errMsg, `"`)
+		if start != -1 {
+			end := strings.Index(errMsg[start+1:], `"`)
+			if end != -1 {
+				backendName := errMsg[start+1 : start+1+end]
+
+				// Check if there are available backends listed
+				if idx := strings.Index(errMsg, "available backends:"); idx != -1 {
+					available := strings.TrimSpace(errMsg[idx+len("available backends:"):])
+					return fmt.Sprintf("Server doesn't have the %q plugin installed.\nAvailable backends: %s", backendName, available)
+				}
+				return fmt.Sprintf("Server doesn't have the %q plugin installed (no plugins available)", backendName)
+			}
+		}
+	}
+	return errMsg
 }
 
 var enrollCmd = &cobra.Command{
@@ -72,7 +97,8 @@ Example:
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s", parseServerError(body))
+			errMsg := parseServerError(body)
+			return fmt.Errorf("%s", formatEnrollError(errMsg))
 		}
 
 		var enrollResp struct {

@@ -802,6 +802,12 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate scopes against installed backends
+	if err := s.validateScopes(req.Scopes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Generate a secret for the client to poll with
 	secret := generateToken()
 	scopesJSON, _ := json.Marshal(req.Scopes)
@@ -844,6 +850,12 @@ func (s *Server) handleScopeRequest(w http.ResponseWriter, r *http.Request) {
 
 	if len(req.Scopes) == 0 {
 		writeError(w, http.StatusBadRequest, "scopes required")
+		return
+	}
+
+	// Validate scopes against installed backends
+	if err := s.validateScopes(req.Scopes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1065,6 +1077,41 @@ func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Rejected enrollment: %s", enrollment.Name)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateScopes checks that all scopes reference installed backends
+func (s *Server) validateScopes(scopes []string) error {
+	if len(scopes) == 0 {
+		return nil
+	}
+
+	installedBackends := s.backends.List()
+	installedSet := make(map[string]bool)
+	for _, name := range installedBackends {
+		installedSet[name] = true
+	}
+
+	for _, scope := range scopes {
+		// Extract backend name (everything before first ':')
+		backendName := scope
+		if idx := strings.Index(scope, ":"); idx != -1 {
+			backendName = scope[:idx]
+		}
+
+		// Wildcard scope allows all backends
+		if backendName == "*" {
+			continue
+		}
+
+		if !installedSet[backendName] {
+			if len(installedBackends) == 0 {
+				return fmt.Errorf("unknown backend %q in scope %q - no plugins installed", backendName, scope)
+			}
+			return fmt.Errorf("unknown backend %q in scope %q - available backends: %s", backendName, scope, strings.Join(installedBackends, ", "))
+		}
+	}
+
+	return nil
 }
 
 // Helpers
