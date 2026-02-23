@@ -14,10 +14,11 @@ type Token struct {
 
 // TokenRequest contains parameters for requesting a token
 type TokenRequest struct {
-	InstallationID int64    // GitHub: installation ID
-	Repos          []string // GitHub: list of owner/repo to scope token to
-	ReadOnly       bool     // Request read-only permissions
-	DopplerScopes  []string // Doppler: list of project/config scopes
+	InstallationID int64         // GitHub: installation ID
+	Repos          []string      // GitHub: list of owner/repo to scope token to
+	ReadOnly       bool          // Request read-only permissions
+	DopplerScopes  []string      // Doppler: list of project/config scopes
+	TTL            time.Duration // Requested TTL for the credential
 }
 
 // Backend is the interface that all credential backends must implement

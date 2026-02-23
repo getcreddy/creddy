@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	sdk "github.com/getcreddy/creddy-plugin-sdk"
@@ -49,6 +50,17 @@ func (pb *PluginBackend) GetToken(req backend.TokenRequest) (*backend.Token, err
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Use TTL from request, default to 10 minutes
+	ttl := req.TTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+
+	// Validate TTL against plugin constraints
+	if err := pb.ValidateTTL(ttl); err != nil {
+		return nil, err
+	}
+
 	// Build the scope from the request
 	scope := pb.buildScope(req)
 
@@ -60,7 +72,7 @@ func (pb *PluginBackend) GetToken(req backend.TokenRequest) (*backend.Token, err
 			Scopes: []string{scope},
 		},
 		Scope: scope,
-		TTL:   10 * time.Minute, // Default TTL
+		TTL:   ttl,
 	}
 
 	cred, err := pb.plugin.GetCredential(ctx, credReq)
@@ -79,6 +91,17 @@ func (pb *PluginBackend) GetTokenWithID(req backend.TokenRequest) (*backend.Toke
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Use TTL from request, default to 10 minutes
+	ttl := req.TTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+
+	// Validate TTL against plugin constraints
+	if err := pb.ValidateTTL(ttl); err != nil {
+		return nil, "", err
+	}
+
 	scope := pb.buildScope(req)
 
 	credReq := &sdk.CredentialRequest{
@@ -88,7 +111,7 @@ func (pb *PluginBackend) GetTokenWithID(req backend.TokenRequest) (*backend.Toke
 			Scopes: []string{scope},
 		},
 		Scope: scope,
-		TTL:   10 * time.Minute,
+		TTL:   ttl,
 	}
 
 	cred, err := pb.plugin.GetCredential(ctx, credReq)
@@ -129,6 +152,40 @@ func (pb *PluginBackend) GetScopes() ([]sdk.ScopeSpec, error) {
 	defer cancel()
 
 	return pb.plugin.Scopes(ctx)
+}
+
+// GetConstraints returns the TTL constraints for this plugin
+func (pb *PluginBackend) GetConstraints() (*sdk.Constraints, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return pb.plugin.Constraints(ctx)
+}
+
+// ValidateTTL checks if the requested TTL is within the plugin's constraints
+// Returns an error with a clear message if the TTL violates constraints
+func (pb *PluginBackend) ValidateTTL(ttl time.Duration) error {
+	constraints, err := pb.GetConstraints()
+	if err != nil {
+		return fmt.Errorf("failed to get plugin constraints: %w", err)
+	}
+
+	// No constraints means any TTL is acceptable
+	if constraints == nil {
+		return nil
+	}
+
+	if constraints.MaxTTL > 0 && ttl > constraints.MaxTTL {
+		return fmt.Errorf("requested TTL %s exceeds maximum allowed %s for %s plugin (%s)",
+			ttl, constraints.MaxTTL, pb.pluginName, constraints.Description)
+	}
+
+	if constraints.MinTTL > 0 && ttl < constraints.MinTTL {
+		return fmt.Errorf("requested TTL %s is below minimum allowed %s for %s plugin (%s)",
+			ttl, constraints.MinTTL, pb.pluginName, constraints.Description)
+	}
+
+	return nil
 }
 
 // buildScope constructs a scope string from a TokenRequest

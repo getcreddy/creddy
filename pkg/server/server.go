@@ -286,28 +286,26 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	if err != nil || ttl <= 0 {
 		ttl = 10 * time.Minute
 	}
-	// Cap at 1 hour for safety
-	if ttl > time.Hour {
-		ttl = time.Hour
-	}
+	// Note: Plugin constraints (max/min TTL) are validated by PluginBackend.ValidateTTL()
+	// Native backends should implement their own validation
 
 	// Generate credential
 	var cred *backend.Token
 	var externalID string
 
+	// Build token request with TTL
+	tokenReq := backend.TokenRequest{
+		Repos:         repos,
+		ReadOnly:      readOnly,
+		DopplerScopes: dopplerScopes,
+		TTL:           ttl,
+	}
+
 	// Check if backend supports revocation (like Anthropic, Doppler)
 	if rb, ok := b.(backend.RevocableBackend); ok {
-		cred, externalID, err = rb.GetTokenWithID(backend.TokenRequest{
-			Repos:         repos,
-			ReadOnly:      readOnly,
-			DopplerScopes: dopplerScopes,
-		})
+		cred, externalID, err = rb.GetTokenWithID(tokenReq)
 	} else {
-		cred, err = b.GetToken(backend.TokenRequest{
-			Repos:         repos,
-			ReadOnly:      readOnly,
-			DopplerScopes: dopplerScopes,
-		})
+		cred, err = b.GetToken(tokenReq)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate credential: "+err.Error())
