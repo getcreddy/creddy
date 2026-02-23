@@ -8,7 +8,7 @@ import (
 
 	"github.com/getcreddy/creddy/pkg/client"
 	"github.com/getcreddy/creddy/pkg/enrollment"
-	"github.com/google/uuid"
+	"github.com/getcreddy/creddy/pkg/namegen"
 )
 
 func (s *Store) migrateClients() error {
@@ -63,7 +63,7 @@ func (s *Store) migrateClients() error {
 // Enrollment operations
 
 func (s *Store) CreateEnrollment(name string, publicKey ed25519.PublicKey, metadata map[string]string, ipAddress string, expiresAt time.Time) (*enrollment.Enrollment, error) {
-	id := "enr_" + uuid.New().String()[:8]
+	id := namegen.Generate()
 	fingerprint := client.Fingerprint(publicKey)
 	
 	metadataJSON, _ := json.Marshal(metadata)
@@ -206,7 +206,7 @@ func (s *Store) ApproveEnrollment(id, approvedBy, role, note string) (*enrollmen
 	}
 	
 	// Create the client
-	clientID := "cli_" + uuid.New().String()[:8]
+	clientID := namegen.GenerateWithPrefix("cli")
 	if role == "" {
 		role = string(enrollment.RoleOperator)
 	}
