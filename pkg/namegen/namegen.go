@@ -1,10 +1,9 @@
 // Package namegen generates Docker-style human-readable identifiers.
-// Format: adjective_surname_hex (e.g., "brave_turing_a7f")
+// Format: adjective_surname (e.g., "brave_turing")
 package namegen
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -73,8 +72,7 @@ var surnames = []string{
 func Generate() string {
 	adj := adjectives[randInt(len(adjectives))]
 	sur := surnames[randInt(len(surnames))]
-	suffix := randomHex(3)
-	return fmt.Sprintf("%s_%s_%s", adj, sur, suffix)
+	return fmt.Sprintf("%s_%s", adj, sur)
 }
 
 // GenerateWithPrefix creates an identifier with a custom prefix.
@@ -94,11 +92,4 @@ func randInt(max int) int {
 		return 0
 	}
 	return int(n.Int64())
-}
-
-// randomHex returns a random hex string of the specified byte length
-func randomHex(byteLen int) string {
-	b := make([]byte, byteLen)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:byteLen]
 }
