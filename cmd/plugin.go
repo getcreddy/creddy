@@ -789,6 +789,31 @@ func runPluginInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %-25s %s\n", s.Pattern, s.Description)
 	}
 
+	// Get constraints
+	constraints, err := p.Plugin.Constraints(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get constraints: %w", err)
+	}
+
+	fmt.Println("\nTTL Constraints:")
+	if constraints == nil {
+		fmt.Println("  No TTL constraints (any TTL is acceptable)")
+	} else {
+		if constraints.MaxTTL > 0 {
+			fmt.Printf("  Max TTL: %s\n", constraints.MaxTTL)
+		} else {
+			fmt.Println("  Max TTL: none")
+		}
+		if constraints.MinTTL > 0 {
+			fmt.Printf("  Min TTL: %s\n", constraints.MinTTL)
+		} else {
+			fmt.Println("  Min TTL: none")
+		}
+		if constraints.Description != "" {
+			fmt.Printf("  Note:    %s\n", constraints.Description)
+		}
+	}
+
 	return nil
 }
 
