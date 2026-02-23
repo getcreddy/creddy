@@ -305,62 +305,74 @@ func installFromOCI(reference, pluginDir string) error {
 		return fmt.Errorf("failed to read pulled content: %w", err)
 	}
 
-	installedCount := 0
+	// Determine the current platform suffix (e.g., "linux-amd64", "darwin-arm64")
+	platformSuffix := fmt.Sprintf("-%s-%s", runtime.GOOS, runtime.GOARCH)
+
+	// Extract plugin name from reference (e.g., ttl.sh/creddy-github:1h -> creddy-github)
+	refParts := strings.Split(reference, "/")
+	lastPart := refParts[len(refParts)-1]
+	if colonIdx := strings.Index(lastPart, ":"); colonIdx != -1 {
+		lastPart = lastPart[:colonIdx]
+	}
+	pluginName := lastPart
+
+	// Look for platform-specific binary first
+	var platformBinary string
+	var allBinaries []string
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-
-		srcPath := filepath.Join(tmpDir, entry.Name())
-		
 		// Skip manifest and config files that ORAS creates
 		if strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-
-		// Determine the destination name
-		destName := entry.Name()
-		// If the file doesn't start with "creddy-", add the prefix
-		if !strings.HasPrefix(destName, "creddy-") {
-			// Extract plugin name from reference (e.g., ttl.sh/creddy-github:1h -> creddy-github)
-			refParts := strings.Split(reference, "/")
-			lastPart := refParts[len(refParts)-1]
-			if colonIdx := strings.Index(lastPart, ":"); colonIdx != -1 {
-				lastPart = lastPart[:colonIdx]
-			}
-			if strings.HasPrefix(lastPart, "creddy-") {
-				destName = lastPart
-			}
+		allBinaries = append(allBinaries, entry.Name())
+		// Check if this is the binary for our platform
+		if strings.HasSuffix(entry.Name(), platformSuffix) {
+			platformBinary = entry.Name()
 		}
-
-		destPath := filepath.Join(pluginDir, destName)
-
-		// Copy the file
-		srcFile, err := os.Open(srcPath)
-		if err != nil {
-			continue
-		}
-
-		destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			srcFile.Close()
-			return fmt.Errorf("failed to create plugin file: %w", err)
-		}
-
-		_, err = io.Copy(destFile, srcFile)
-		srcFile.Close()
-		destFile.Close()
-
-		if err != nil {
-			return fmt.Errorf("failed to copy plugin: %w", err)
-		}
-
-		installedCount++
 	}
 
-	if installedCount == 0 {
-		return fmt.Errorf("no plugin binary found in OCI artifact")
+	if platformBinary == "" {
+		if len(allBinaries) == 0 {
+			return fmt.Errorf("no plugin binary found in OCI artifact")
+		}
+		// If there are binaries but none match our platform, show helpful error
+		return fmt.Errorf("no binary for platform %s/%s found in OCI artifact (available: %s)",
+			runtime.GOOS, runtime.GOARCH, strings.Join(allBinaries, ", "))
 	}
+
+	srcPath := filepath.Join(tmpDir, platformBinary)
+
+	// Determine destination name: strip platform suffix
+	// e.g., "creddy-github-linux-amd64" -> "creddy-github"
+	destName := strings.TrimSuffix(platformBinary, platformSuffix)
+	if destName == "" {
+		destName = pluginName
+	}
+
+	destPath := filepath.Join(pluginDir, destName)
+
+	// Copy the platform-specific binary
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source binary: %w", err)
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create plugin file: %w", err)
+	}
+	defer destFile.Close()
+
+	if _, err = io.Copy(destFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy plugin: %w", err)
+	}
+
+	fmt.Printf("  Installed %s for %s/%s\n", destName, runtime.GOOS, runtime.GOARCH)
 
 	return nil
 }
