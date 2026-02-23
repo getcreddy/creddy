@@ -65,13 +65,6 @@ var serverCmd = &cobra.Command{
 		// Register plugin loader as the default
 		plugin.NewLoaderBridge(pluginLoader).Register()
 
-		// Start watching for plugin changes (hot-reload)
-		go func() {
-			if err := pluginLoader.Watch(); err != nil {
-				log.Printf("Plugin watcher error: %v", err)
-			}
-		}()
-
 		// Log loaded plugins
 		loadedPlugins := pluginLoader.ListPlugins()
 		if len(loadedPlugins) > 0 {
@@ -85,6 +78,7 @@ var serverCmd = &cobra.Command{
 			DBPath:               dbPath,
 			Domain:               domain,
 			AgentInactivityLimit: agentInactivityLimit,
+			PluginLoader:         pluginLoader,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to start server: %w", err)
@@ -98,7 +92,6 @@ var serverCmd = &cobra.Command{
 		go func() {
 			<-sigCh
 			fmt.Println("\nShutting down...")
-			pluginLoader.StopWatch()
 			pluginLoader.UnloadAll()
 			srv.Close()
 			os.Exit(0)

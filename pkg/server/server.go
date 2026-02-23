@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/backend"
+	"github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/getcreddy/creddy/pkg/signing"
 	"github.com/getcreddy/creddy/pkg/store"
 )
@@ -20,6 +21,7 @@ import (
 type Server struct {
 	store                *store.Store
 	backends             *backend.Manager
+	pluginLoader         *plugin.Loader
 	domain               string
 	agentInactivityLimit time.Duration
 	ctx                  context.Context
@@ -28,8 +30,9 @@ type Server struct {
 
 type Config struct {
 	DBPath               string
-	Domain               string        // Domain for agent email addresses (e.g., creddy.dev)
-	AgentInactivityLimit time.Duration // Auto-unenroll agents inactive for this long (0 = disabled)
+	Domain               string         // Domain for agent email addresses (e.g., creddy.dev)
+	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
+	PluginLoader         *plugin.Loader // Plugin loader for hot-reload support
 }
 
 func New(cfg Config) (*Server, error) {
@@ -48,6 +51,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		store:                st,
 		backends:             backend.NewManager(),
+		pluginLoader:         cfg.PluginLoader,
 		domain:               domain,
 		agentInactivityLimit: cfg.AgentInactivityLimit,
 		ctx:                  ctx,
@@ -207,6 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/pending", s.handleListPending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/reject", s.handleRejectPending)
+	mux.HandleFunc("POST /v1/admin/plugins/reload", s.handlePluginReload)
 
 	// Enrollment endpoints (new PKI-based auth)
 	s.RegisterEnrollmentRoutes(mux)
@@ -605,6 +610,33 @@ func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
 	// TODO: remove from s.backends manager
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
+	if s.pluginLoader == nil {
+		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
+		return
+	}
+
+	loaded, err := s.pluginLoader.Reload()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reload plugins: "+err.Error())
+		return
+	}
+
+	// Get full list of loaded plugins
+	allPlugins := s.pluginLoader.ListPlugins()
+	pluginNames := make([]string, 0, len(allPlugins))
+	for _, p := range allPlugins {
+		pluginNames = append(pluginNames, p.Info.Name)
+	}
+
+	log.Printf("Plugin reload: %d new plugins loaded, %d total", len(loaded), len(pluginNames))
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"loaded":  loaded,
+		"plugins": pluginNames,
+	})
 }
 
 func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {

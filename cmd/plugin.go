@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -138,6 +139,45 @@ func getRegistry() string {
 		return envReg
 	}
 	return defaultRegistry
+}
+
+// triggerPluginReload tells the running server to reload plugins.
+// If the server isn't reachable, it prints a message suggesting a restart.
+func triggerPluginReload() {
+	serverURL := viper.GetString("admin.url")
+	if serverURL == "" {
+		serverURL = "http://127.0.0.1:8400"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", serverURL+"/v1/admin/plugins/reload", bytes.NewReader(nil))
+	if err != nil {
+		fmt.Println("Note: Restart the creddy server to load the new plugin")
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("Note: Restart the creddy server to load the new plugin")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var result struct {
+			Loaded  []string `json:"loaded"`
+			Plugins []string `json:"plugins"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+			if len(result.Loaded) > 0 {
+				fmt.Printf("Server reloaded: %d new plugin(s) loaded\n", len(result.Loaded))
+			}
+		}
+	} else {
+		fmt.Println("Note: Restart the creddy server to load the new plugin")
+	}
 }
 
 func fetchRegistryIndex() (*RegistryIndex, error) {
@@ -470,6 +510,9 @@ func runPluginInstall(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("✓ Installed %s@%s\n", name, version)
 	}
+
+	// Tell the server to reload plugins
+	triggerPluginReload()
 
 	return nil
 }
