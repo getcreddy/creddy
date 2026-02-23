@@ -135,9 +135,9 @@ func (s *Server) revokeCredentialFromBackend(backendName, externalID string) {
 
 	if rb, ok := b.(backend.RevocableBackend); ok {
 		if err := rb.RevokeToken(externalID); err != nil {
-			log.Printf("Warning: failed to revoke %s token %s: %v", backendName, externalID, err)
+			log.Printf("Warning: failed to revoke %s credential: %v", backendName, err)
 		} else {
-			log.Printf("Revoked %s token %s", backendName, externalID)
+			log.Printf("Revoked %s credential", backendName)
 		}
 	}
 }
