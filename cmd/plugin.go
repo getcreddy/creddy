@@ -412,6 +412,7 @@ func installFromOCI(reference, pluginDir string) error {
 	}
 
 	fmt.Printf("  Installed %s for %s/%s\n", destName, runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("  Next: configure with 'creddy backend add %s --config {...}'\n", destName)
 
 	return nil
 }
