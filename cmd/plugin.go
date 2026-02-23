@@ -401,14 +401,24 @@ func installFromOCI(reference, pluginDir string) error {
 	}
 	defer srcFile.Close()
 
-	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	// Write to temp file first, then atomic rename (handles "text file busy" on running plugins)
+	tmpPath := destPath + ".tmp"
+	destFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to create plugin file: %w", err)
+		return fmt.Errorf("failed to create temp plugin file: %w", err)
 	}
-	defer destFile.Close()
 
 	if _, err = io.Copy(destFile, srcFile); err != nil {
+		destFile.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to copy plugin: %w", err)
+	}
+	destFile.Close()
+
+	// Atomic rename - works even if destination is busy
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to install plugin: %w", err)
 	}
 
 	fmt.Printf("  Installed %s for %s/%s\n", destName, runtime.GOOS, runtime.GOARCH)
