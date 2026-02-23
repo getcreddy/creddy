@@ -73,8 +73,24 @@ type PluginLoader interface {
 	LoadPlugin(name string) (Backend, error)
 }
 
+// PluginLister can list available plugins (optional interface)
+type PluginLister interface {
+	ListAvailable() []string
+}
+
 // DefaultPluginLoader is set by the server on startup
 var DefaultPluginLoader PluginLoader
+
+// ListAvailablePlugins returns names of all available plugins
+func ListAvailablePlugins() []string {
+	if DefaultPluginLoader == nil {
+		return nil
+	}
+	if lister, ok := DefaultPluginLoader.(PluginLister); ok {
+		return lister.ListAvailable()
+	}
+	return nil
+}
 
 // LoadFromConfig creates a backend from stored config
 func LoadFromConfig(backendType, configJSON string) (Backend, error) {

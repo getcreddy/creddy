@@ -28,3 +28,13 @@ func (b *LoaderBridge) LoadPlugin(name string) (backend.Backend, error) {
 func (b *LoaderBridge) Register() {
 	backend.DefaultPluginLoader = b
 }
+
+// ListAvailable returns names of all available plugins
+func (b *LoaderBridge) ListAvailable() []string {
+	plugins := b.loader.ListPlugins()
+	names := make([]string, len(plugins))
+	for i, p := range plugins {
+		names[i] = p.Info.Name
+	}
+	return names
+}

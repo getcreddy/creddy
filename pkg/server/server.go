@@ -1079,16 +1079,33 @@ func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// validateScopes checks that all scopes reference installed backends
+// validateScopes checks that all scopes reference installed backends/plugins
 func (s *Server) validateScopes(scopes []string) error {
 	if len(scopes) == 0 {
 		return nil
 	}
 
+	// Combine configured backends and available plugins
 	installedBackends := s.backends.List()
+	availablePlugins := backend.ListAvailablePlugins()
+	
 	installedSet := make(map[string]bool)
 	for _, name := range installedBackends {
 		installedSet[name] = true
+	}
+	for _, name := range availablePlugins {
+		installedSet[name] = true
+		// Also add to list for error message
+		found := false
+		for _, b := range installedBackends {
+			if b == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			installedBackends = append(installedBackends, name)
+		}
 	}
 
 	for _, scope := range scopes {
