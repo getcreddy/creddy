@@ -19,6 +19,9 @@ import (
 	"github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content/file"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 const (
@@ -40,13 +43,15 @@ var pluginListCmd = &cobra.Command{
 var pluginInstallCmd = &cobra.Command{
 	Use:   "install <plugin[@version]> [plugin[@version]...]",
 	Short: "Install plugins",
-	Long: `Install plugins from the registry or a URL.
+	Long: `Install plugins from the registry, OCI registry, or a URL.
 
 Examples:
   creddy plugin install github
   creddy plugin install github@0.2.0
   creddy plugin install github anthropic doppler
-  creddy plugin install https://example.com/creddy-custom.tar.gz`,
+  creddy plugin install https://example.com/creddy-custom.tar.gz
+  creddy plugin install ttl.sh/creddy-github:1h
+  creddy plugin install plugins.creddy.dev/github:0.1.0`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPluginInstall,
 }
@@ -238,6 +243,128 @@ func runPluginList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// isOCIReference checks if the argument looks like an OCI registry reference
+// OCI refs have format: registry/repo:tag (e.g., ttl.sh/creddy-github:1h)
+func isOCIReference(arg string) bool {
+	// Must contain both / and : but not be a URL
+	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
+		return false
+	}
+	// Must have at least one / and exactly one :
+	hasSlash := strings.Contains(arg, "/")
+	colonCount := strings.Count(arg, ":")
+	return hasSlash && colonCount == 1
+}
+
+// installFromOCI pulls a plugin from an OCI registry using ORAS
+func installFromOCI(reference, pluginDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Parse the reference to extract registry and repository
+	repo, err := remote.NewRepository(reference)
+	if err != nil {
+		return fmt.Errorf("invalid OCI reference: %w", err)
+	}
+
+	// Use anonymous access (no auth) - ttl.sh and public registries don't require it
+	repo.PlainHTTP = strings.HasPrefix(reference, "localhost") || strings.Contains(reference, "localhost:")
+
+	// Create a temporary directory for the pulled content
+	tmpDir, err := os.MkdirTemp("", "creddy-oci-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a file store to pull content into
+	fs, err := file.New(tmpDir)
+	if err != nil {
+		return fmt.Errorf("failed to create file store: %w", err)
+	}
+	defer fs.Close()
+
+	// Extract tag from reference
+	tag := "latest"
+	if idx := strings.LastIndex(reference, ":"); idx != -1 {
+		tag = reference[idx+1:]
+	}
+
+	// Pull the artifact
+	desc, err := oras.Copy(ctx, repo, tag, fs, tag, oras.DefaultCopyOptions)
+	if err != nil {
+		return fmt.Errorf("failed to pull from OCI registry: %w", err)
+	}
+
+	fmt.Printf("  Pulled %s (digest: %s)\n", reference, desc.Digest.String()[:12])
+
+	// Find and copy the binary from the pulled content
+	// ORAS pulls files to the temp directory - look for executables
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return fmt.Errorf("failed to read pulled content: %w", err)
+	}
+
+	installedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		srcPath := filepath.Join(tmpDir, entry.Name())
+		
+		// Skip manifest and config files that ORAS creates
+		if strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		// Determine the destination name
+		destName := entry.Name()
+		// If the file doesn't start with "creddy-", add the prefix
+		if !strings.HasPrefix(destName, "creddy-") {
+			// Extract plugin name from reference (e.g., ttl.sh/creddy-github:1h -> creddy-github)
+			refParts := strings.Split(reference, "/")
+			lastPart := refParts[len(refParts)-1]
+			if colonIdx := strings.Index(lastPart, ":"); colonIdx != -1 {
+				lastPart = lastPart[:colonIdx]
+			}
+			if strings.HasPrefix(lastPart, "creddy-") {
+				destName = lastPart
+			}
+		}
+
+		destPath := filepath.Join(pluginDir, destName)
+
+		// Copy the file
+		srcFile, err := os.Open(srcPath)
+		if err != nil {
+			continue
+		}
+
+		destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			srcFile.Close()
+			return fmt.Errorf("failed to create plugin file: %w", err)
+		}
+
+		_, err = io.Copy(destFile, srcFile)
+		srcFile.Close()
+		destFile.Close()
+
+		if err != nil {
+			return fmt.Errorf("failed to copy plugin: %w", err)
+		}
+
+		installedCount++
+	}
+
+	if installedCount == 0 {
+		return fmt.Errorf("no plugin binary found in OCI artifact")
+	}
+
+	return nil
+}
+
 func runPluginInstall(cmd *cobra.Command, args []string) error {
 	pluginDir := getPluginDir()
 
@@ -249,6 +376,17 @@ func runPluginInstall(cmd *cobra.Command, args []string) error {
 	var index *RegistryIndex
 
 	for _, arg := range args {
+		// Check if it's an OCI reference (e.g., ttl.sh/creddy-github:1h)
+		if isOCIReference(arg) {
+			fmt.Printf("Installing from OCI registry: %s\n", arg)
+			if err := installFromOCI(arg, pluginDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to install from OCI: %v\n", err)
+				continue
+			}
+			fmt.Printf("✓ Installed plugin from %s\n", arg)
+			continue
+		}
+
 		// Check if it's a URL
 		if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
 			if err := installFromURL(arg, pluginDir); err != nil {
