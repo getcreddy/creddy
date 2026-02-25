@@ -28,8 +28,12 @@ var serverCmd = &cobra.Command{
 
 		dbPath := viper.GetString("database.path")
 		if dbPath == "" {
-			home, _ := os.UserHomeDir()
-			dbPath = filepath.Join(home, ".creddy", "creddy.db")
+			if home, err := os.UserHomeDir(); err == nil {
+				dbPath = filepath.Join(home, ".creddy", "creddy.db")
+			} else {
+				// No HOME (e.g., systemd service) - use /var/lib/creddy
+				dbPath = "/var/lib/creddy/creddy.db"
+			}
 		}
 
 		domain := viper.GetString("server.domain")
@@ -46,14 +50,28 @@ var serverCmd = &cobra.Command{
 		// Ensure directory exists
 		os.MkdirAll(filepath.Dir(dbPath), 0700)
 
-		// Load plugins
-		pluginDir := viper.GetString("plugin.dir")
-		if pluginDir == "" {
-			if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
-				pluginDir = envDir
-			} else {
-				home, _ := os.UserHomeDir()
-				pluginDir = filepath.Join(home, ".creddy", "plugins")
+		// Load plugins from multiple directories
+		pluginDirs := []string{}
+		
+		if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
+			pluginDirs = append(pluginDirs, envDir)
+		}
+		if configDir := viper.GetString("plugin.dir"); configDir != "" {
+			pluginDirs = append(pluginDirs, configDir)
+		}
+		// User plugins
+		if home, err := os.UserHomeDir(); err == nil {
+			pluginDirs = append(pluginDirs, filepath.Join(home, ".local", "share", "creddy", "plugins"))
+		}
+		// System plugins
+		pluginDirs = append(pluginDirs, "/usr/local/lib/creddy/plugins")
+		
+		// Use the first existing directory, or the system dir as fallback
+		pluginDir := "/usr/local/lib/creddy/plugins"
+		for _, dir := range pluginDirs {
+			if _, err := os.Stat(dir); err == nil {
+				pluginDir = dir
+				break
 			}
 		}
 

@@ -37,12 +37,14 @@ func initConfig() {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
-
-		// Search order: ~/.config/creddy, ~/.creddy (legacy), current dir
-		viper.AddConfigPath(home + "/.config/creddy")
-		viper.AddConfigPath(home + "/.creddy")
+		// Try to get home dir, but don't fail if not available (e.g., systemd service)
+		if home, err := os.UserHomeDir(); err == nil {
+			// Search order: ~/.config/creddy, ~/.creddy (legacy), current dir
+			viper.AddConfigPath(home + "/.config/creddy")
+			viper.AddConfigPath(home + "/.creddy")
+		}
+		// Also check /etc/creddy for system-wide config
+		viper.AddConfigPath("/etc/creddy")
 		viper.AddConfigPath(".")
 		viper.SetConfigType("yaml")
 		viper.SetConfigName("config")
