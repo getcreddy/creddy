@@ -652,6 +652,17 @@ func installFromURL(url, pluginDir string, expectedChecksum ...string) error {
 	name := filepath.Base(url)
 	name = strings.TrimSuffix(name, ".tar.gz")
 	name = strings.TrimSuffix(name, ".tgz")
+	name = strings.TrimSuffix(name, ".exe")
+	
+	// Strip platform suffix (e.g., -linux-amd64, -darwin-arm64)
+	platformSuffixes := []string{
+		"-linux-amd64", "-linux-arm64",
+		"-darwin-amd64", "-darwin-arm64",
+		"-windows-amd64", "-windows-arm64",
+	}
+	for _, suffix := range platformSuffixes {
+		name = strings.TrimSuffix(name, suffix)
+	}
 
 	destPath := filepath.Join(pluginDir, name)
 	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
