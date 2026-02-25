@@ -21,10 +21,10 @@ var listCmd = &cobra.Command{
 		token := viper.GetString("token")
 
 		if serverURL == "" {
-			return fmt.Errorf("CREDDY_URL not set")
+			serverURL = "http://127.0.0.1:8400" // default to local
 		}
 		if token == "" {
-			return fmt.Errorf("CREDDY_TOKEN not set")
+			// Token optional for local server
 		}
 
 		req, err := http.NewRequest("GET", serverURL+"/v1/active", nil)

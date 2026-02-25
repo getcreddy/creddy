@@ -42,14 +42,12 @@ Examples:
 		outputJSON, _ := cmd.Flags().GetBool("json")
 
 		serverURL := viper.GetString("url")
-		token := viper.GetString("token")
-
 		if serverURL == "" {
-			return fmt.Errorf("CREDDY_URL not set")
+			serverURL = "http://127.0.0.1:8400"
 		}
-		if token == "" {
-			return fmt.Errorf("CREDDY_TOKEN not set")
-		}
+		
+		token := viper.GetString("token")
+		// Token is optional for local server without auth
 
 		// Build request
 		url := fmt.Sprintf("%s/v1/credentials/%s?ttl=%s", serverURL, backend, ttl)

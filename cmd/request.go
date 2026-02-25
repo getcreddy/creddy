@@ -66,10 +66,10 @@ Example:
 		token := viper.GetString("token")
 
 		if serverURL == "" {
-			return fmt.Errorf("CREDDY_URL not set (not enrolled?)")
+			serverURL = "http://127.0.0.1:8400"
 		}
 		if token == "" {
-			return fmt.Errorf("CREDDY_TOKEN not set (not enrolled?)")
+			// Token optional for local server
 		}
 
 		reqBody, _ := json.Marshal(map[string]interface{}{
