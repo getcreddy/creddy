@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: creddy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          BINARY="${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -ldflags="-s -w -X main.Version=${VERSION}" -o "$BINARY" .
+          sha256sum "$BINARY" > "$BINARY.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+            ${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        id: prep
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          mkdir -p release
+          
+          # Move all binaries to release dir
+          find artifacts -type f -exec mv {} release/ \;
+          
+          # Generate manifest
+          cd release
+          cat > manifest.json << 'MANIFEST_START'
+          {
+            "name": "creddy",
+            "version": "VERSION_PLACEHOLDER",
+            "released_at": "TIMESTAMP_PLACEHOLDER",
+            "binaries": [
+          MANIFEST_START
+          
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/" manifest.json
+          sed -i "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" manifest.json
+          
+          FIRST=true
+          for f in ${{ env.BINARY_NAME }}-*; do
+            [[ "$f" == *.sha256 ]] && continue
+            [[ "$f" == manifest.json ]] && continue
+            
+            CHECKSUM=$(cat "$f.sha256" | awk '{print $1}')
+            
+            # Parse os and arch from filename: creddy-{os}-{arch}[.exe]
+            BASENAME="${f%.*}"  # Remove .exe if present
+            OS=$(echo "$BASENAME" | cut -d'-' -f2)
+            ARCH=$(echo "$BASENAME" | cut -d'-' -f3)
+            
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              echo "," >> manifest.json
+            fi
+            
+            cat >> manifest.json << ENTRY
+              {
+                "os": "$OS",
+                "arch": "$ARCH",
+                "filename": "$f",
+                "sha256": "$CHECKSUM",
+                "url": "https://get.creddy.dev/cli/$VERSION/$f"
+              }
+          ENTRY
+          done
+          
+          cat >> manifest.json << 'MANIFEST_END'
+            ]
+          }
+          MANIFEST_END
+          
+          echo "Release files:"
+          ls -la
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+        run: |
+          VERSION="${{ steps.prep.outputs.version }}"
+          R2_ENDPOINT="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          
+          # Upload versioned files
+          aws s3 cp release/ "s3://${{ secrets.R2_BUCKET }}/cli/$VERSION/" \
+            --recursive \
+            --endpoint-url "$R2_ENDPOINT"
+          
+          # Copy to latest/
+          aws s3 cp release/ "s3://${{ secrets.R2_BUCKET }}/cli/latest/" \
+            --recursive \
+            --endpoint-url "$R2_ENDPOINT"
+          
+          # Upload install script to root
+          aws s3 cp scripts/install.sh "s3://${{ secrets.R2_BUCKET }}/install.sh" \
+            --content-type "text/plain" \
+            --endpoint-url "$R2_ENDPOINT"
+          
+          echo "✅ Published to R2:"
+          echo "   https://get.creddy.dev/cli/$VERSION/"
+          echo "   https://get.creddy.dev/cli/latest/"
+          echo "   https://get.creddy.dev/install.sh"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
