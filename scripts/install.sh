@@ -2,9 +2,10 @@
 # Creddy installer script
 # Usage: curl -fsSL https://get.creddy.dev/install.sh | sh
 #        curl -fsSL https://get.creddy.dev/install.sh | sh -s -- v0.1.0
+#        curl -fsSL https://get.creddy.dev/install.sh | sudo sh -s -- --to /usr/local/bin
 #
 # Environment variables:
-#   INSTALL_DIR    - Override install directory
+#   INSTALL_DIR    - Override install directory (same as --to)
 #   SKIP_VERIFY    - Skip checksum verification (not recommended)
 
 set -e
@@ -42,6 +43,31 @@ warn() {
 error() {
     printf "${RED}Error:${NC} %s\n" "$1" >&2
     exit 1
+}
+
+usage() {
+    cat <<EOF
+Creddy Installer
+
+Usage:
+  curl -fsSL https://get.creddy.dev/install.sh | sh
+  curl -fsSL https://get.creddy.dev/install.sh | sh -s -- [OPTIONS] [VERSION]
+
+Options:
+  --to DIR    Install to specific directory (default: ~/.local/bin or /usr/local/bin with root)
+  --help      Show this help message
+
+Examples:
+  # User install (no sudo)
+  curl -fsSL https://get.creddy.dev/install.sh | sh
+
+  # System install (with sudo)
+  curl -fsSL https://get.creddy.dev/install.sh | sudo sh -s -- --to /usr/local/bin
+
+  # Specific version
+  curl -fsSL https://get.creddy.dev/install.sh | sh -s -- v0.1.0
+EOF
+    exit 0
 }
 
 # Detect OS
@@ -162,7 +188,36 @@ add_to_path() {
 }
 
 main() {
-    VERSION="${1:-latest}"
+    VERSION=""
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                ;;
+            --to)
+                if [ -z "$2" ]; then
+                    error "--to requires a directory argument"
+                fi
+                INSTALL_DIR="$2"
+                shift 2
+                ;;
+            --to=*)
+                INSTALL_DIR="${1#--to=}"
+                shift
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                VERSION="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    VERSION="${VERSION:-latest}"
     
     info "Installing Creddy..."
     
@@ -242,10 +297,14 @@ main() {
     echo "  creddy --help"
     echo ""
     
-    # Show daemon install hint for non-root installs
-    if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
+    # Show appropriate next steps based on install type
+    if [ "$INSTALL_DIR" = "/usr/local/bin" ]; then
+        echo "To start the server daemon:"
+        echo "  sudo creddy install"
+        echo ""
+    else
         echo "To run the server as a system daemon:"
-        echo "  sudo $DEST install"
+        echo "  sudo creddy install"
         echo ""
     fi
 }

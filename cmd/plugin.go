@@ -142,16 +142,45 @@ type ManifestBinary struct {
 	URL      string `json:"url"`
 }
 
+// Plugin directory search order:
+// 1. CREDDY_PLUGIN_DIR env var (if set)
+// 2. ~/.local/share/creddy/plugins (user plugins)
+// 3. /usr/local/lib/creddy/plugins (system plugins)
+//
+// This unified search order works regardless of which binary is running,
+// so user and system installs share the same plugin universe.
+
+func getUserPluginDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "creddy", "plugins")
+}
+
+func getSystemPluginDir() string {
+	return "/usr/local/lib/creddy/plugins"
+}
+
+// getPluginDir returns the directory where plugins should be installed.
+// For installs, this is the user plugin directory by default.
 func getPluginDir() string {
+	if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
+		return envDir
+	}
 	dir := viper.GetString("plugin.dir")
 	if dir != "" {
 		return dir
 	}
+	// Default to user plugins
+	return getUserPluginDir()
+}
+
+// getPluginSearchPaths returns all directories to search for plugins
+func getPluginSearchPaths() []string {
+	paths := []string{}
 	if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
-		return envDir
+		paths = append(paths, envDir)
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".creddy", "plugins")
+	paths = append(paths, getUserPluginDir(), getSystemPluginDir())
+	return paths
 }
 
 func getRegistry() string {
@@ -284,24 +313,35 @@ func getBinaryFromManifest(manifest *PluginManifest) (*ManifestBinary, error) {
 }
 
 func getInstalledPlugins() (map[string]string, error) {
-	pluginDir := getPluginDir()
-	loader := plugin.NewLoader(pluginDir)
-
-	plugins, err := loader.DiscoverPlugins()
-	if err != nil {
-		return nil, err
-	}
-
 	installed := make(map[string]string)
-	for _, name := range plugins {
-		// Try to load and get version
-		p, err := loader.LoadPlugin(name)
-		if err != nil {
-			installed[name] = "unknown"
+
+	// Search all plugin directories
+	for _, pluginDir := range getPluginSearchPaths() {
+		if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 			continue
 		}
-		installed[name] = p.Info.Version
-		loader.UnloadPlugin(name)
+
+		loader := plugin.NewLoader(pluginDir)
+		plugins, err := loader.DiscoverPlugins()
+		if err != nil {
+			continue
+		}
+
+		for _, name := range plugins {
+			// Skip if already found in higher-priority directory
+			if _, exists := installed[name]; exists {
+				continue
+			}
+
+			// Try to load and get version
+			p, err := loader.LoadPlugin(name)
+			if err != nil {
+				installed[name] = "unknown"
+				continue
+			}
+			installed[name] = p.Info.Version
+			loader.UnloadPlugin(name)
+		}
 	}
 
 	return installed, nil

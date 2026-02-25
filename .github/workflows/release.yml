@@ -44,8 +44,16 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
+          COMMIT="${GITHUB_SHA::8}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           BINARY="${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -ldflags="-s -w -X github.com/getcreddy/creddy/cmd.Version=${VERSION}" -o "$BINARY" .
+          
+          LDFLAGS="-s -w"
+          LDFLAGS="$LDFLAGS -X github.com/getcreddy/creddy/cmd.Version=${VERSION}"
+          LDFLAGS="$LDFLAGS -X github.com/getcreddy/creddy/cmd.Commit=${COMMIT}"
+          LDFLAGS="$LDFLAGS -X github.com/getcreddy/creddy/cmd.BuildDate=${BUILD_DATE}"
+          
+          go build -ldflags="$LDFLAGS" -o "$BINARY" .
           sha256sum "$BINARY" > "$BINARY.sha256"
 
       - name: Upload artifact
