@@ -69,7 +69,9 @@ Example:
 			serverURL = "http://127.0.0.1:8400"
 		}
 		if token == "" {
-			// Token optional for local server
+			if token == "" {
+			return fmt.Errorf("not enrolled. Run 'creddy init <server-url>' first")
+		}
 		}
 
 		reqBody, _ := json.Marshal(map[string]interface{}{

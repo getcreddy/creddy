@@ -24,7 +24,9 @@ var listCmd = &cobra.Command{
 			serverURL = "http://127.0.0.1:8400" // default to local
 		}
 		if token == "" {
-			// Token optional for local server
+			if token == "" {
+			return fmt.Errorf("not enrolled. Run 'creddy init <server-url>' first")
+		}
 		}
 
 		req, err := http.NewRequest("GET", serverURL+"/v1/active", nil)

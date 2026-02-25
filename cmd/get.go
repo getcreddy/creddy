@@ -47,7 +47,9 @@ Examples:
 		}
 		
 		token := viper.GetString("token")
-		// Token is optional for local server without auth
+		if token == "" {
+			return fmt.Errorf("not enrolled. Run 'creddy init <server-url>' or 'creddy enroll' first")
+		}
 
 		// Build request
 		url := fmt.Sprintf("%s/v1/credentials/%s?ttl=%s", serverURL, backend, ttl)
