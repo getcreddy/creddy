@@ -248,6 +248,9 @@ func (s *Server) Handler() http.Handler {
 	// Enrollment endpoints (new PKI-based auth)
 	s.RegisterEnrollmentRoutes(mux)
 
+	// Proxy endpoints (for backends that support proxy mode)
+	s.RegisterProxyRoutes(mux)
+
 	return s.withMiddleware(mux)
 }
 

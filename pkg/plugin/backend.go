@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -11,9 +12,10 @@ import (
 
 // PluginBackend wraps a plugin to implement the backend.Backend interface
 type PluginBackend struct {
-	plugin     sdk.Plugin
-	pluginName string
-	configured bool
+	plugin      sdk.Plugin
+	pluginName  string
+	configured  bool
+	proxyConfig *backend.ProxyConfig // Extracted from plugin config
 }
 
 // NewPluginBackend creates a backend wrapper for a plugin
@@ -31,6 +33,14 @@ func (pb *PluginBackend) Configure(configJSON string) error {
 
 	if err := pb.plugin.Configure(ctx, configJSON); err != nil {
 		return err
+	}
+
+	// Extract proxy config if present
+	var cfg struct {
+		Proxy *backend.ProxyConfig `json:"proxy"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Proxy != nil {
+		pb.proxyConfig = cfg.Proxy
 	}
 
 	pb.configured = true
@@ -216,6 +226,15 @@ func (pb *PluginBackend) buildScope(req backend.TokenRequest) string {
 	}
 }
 
+// ProxyConfig implements backend.ProxyBackend
+func (pb *PluginBackend) ProxyConfig() backend.ProxyConfig {
+	if pb.proxyConfig == nil {
+		return backend.ProxyConfig{}
+	}
+	return *pb.proxyConfig
+}
+
 // Ensure PluginBackend implements the interfaces
 var _ backend.Backend = (*PluginBackend)(nil)
 var _ backend.RevocableBackend = (*PluginBackend)(nil)
+var _ backend.ProxyBackend = (*PluginBackend)(nil)

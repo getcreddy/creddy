@@ -38,6 +38,25 @@ type RevocableBackend interface {
 	RevokeToken(externalID string) error
 }
 
+// ProxyConfig holds configuration for proxy-mode backends
+type ProxyConfig struct {
+	// UpstreamURL is the base URL of the external API
+	UpstreamURL string `json:"upstream_url"`
+	// HeaderName is the header name for the credential (default: Authorization)
+	HeaderName string `json:"header_name"`
+	// HeaderPrefix is the prefix for the credential value (e.g., "Bearer ")
+	HeaderPrefix string `json:"header_prefix"`
+}
+
+// ProxyBackend is for backends that support proxy mode
+// In proxy mode, Creddy forwards requests to the upstream API,
+// injecting the real credential automatically
+type ProxyBackend interface {
+	Backend
+	// ProxyConfig returns the configuration for proxy mode
+	ProxyConfig() ProxyConfig
+}
+
 // Manager handles multiple backends
 type Manager struct {
 	backends map[string]Backend
