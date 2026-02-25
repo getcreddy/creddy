@@ -50,26 +50,62 @@ func formatEnrollError(errMsg string) string {
 	return errMsg
 }
 
+// detectLocalServer checks if a creddy server is running locally
+func detectLocalServer() string {
+	localURLs := []string{
+		"http://127.0.0.1:8400",
+		"http://localhost:8400",
+	}
+	
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, url := range localURLs {
+		resp, err := client.Get(url + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
 var enrollCmd = &cobra.Command{
-	Use:   "enroll",
+	Use:   "enroll [server-url]",
 	Short: "Enroll this machine as an agent",
 	Long: `Request enrollment with a creddy server. The server admin must approve
 the request before this machine can request credentials.
 
+If running on the same machine as the server, the URL is auto-detected.
+
 Example:
-  creddy enroll --server http://creddy-server:8400 --name my-agent --can github:read,write
-  
-  # Or with environment variable
-  export CREDDY_URL=http://creddy-server:8400
-  creddy enroll --name my-agent --can github:read,write`,
+  creddy enroll                                    # Auto-detect local server
+  creddy enroll http://creddy-server:8400          # Explicit URL
+  creddy enroll --name my-agent --can github:read  # With options`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL, _ := cmd.Flags().GetString("server")
+		
+		// Check positional arg first
+		if serverURL == "" && len(args) > 0 {
+			serverURL = args[0]
+		}
+		
+		// Then env/config
 		if serverURL == "" {
 			serverURL = viper.GetString("url")
 		}
+		
+		// Try auto-detection
 		if serverURL == "" {
-			return fmt.Errorf("server URL required (--server or CREDDY_URL)")
+			if detected := detectLocalServer(); detected != "" {
+				serverURL = detected
+				fmt.Printf("Auto-detected local server: %s\n", serverURL)
+			}
+		}
+		
+		if serverURL == "" {
+			return fmt.Errorf("server URL required (creddy enroll <url> or CREDDY_URL)")
 		}
 		name, _ := cmd.Flags().GetString("name")
 		scopes, _ := cmd.Flags().GetStringSlice("can")
@@ -152,7 +188,7 @@ Example:
 					fmt.Printf("Token: %s\n", status.Token)
 					fmt.Println("Set CREDDY_TOKEN environment variable or add to config manually.")
 				} else {
-					fmt.Println("Credentials saved to ~/.creddy/config.yaml")
+					fmt.Println("Credentials saved to ~/.config/creddy/config.yaml")
 				}
 
 				fmt.Printf("\nYou can now request credentials:\n")
@@ -176,7 +212,7 @@ func saveCredentials(serverURL, token string) error {
 		return err
 	}
 
-	configDir := filepath.Join(home, ".creddy")
+	configDir := filepath.Join(home, ".config", "creddy")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return err
 	}

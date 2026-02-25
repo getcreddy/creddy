@@ -78,10 +78,11 @@ func runWhich(cmd *cobra.Command, args []string) error {
 	info.Binary.Path = execPath
 	info.Binary.Checksum = hashFile(execPath)
 
-	// Config paths
+	// Config paths (matches initConfig search order)
 	home, _ := os.UserHomeDir()
 	info.Config.SearchPaths = []string{
 		filepath.Join(home, ".config", "creddy", "config.yaml"),
+		filepath.Join(home, ".creddy", "config.yaml"), // legacy
 		"/etc/creddy/config.yaml",
 	}
 	// Check which one is active

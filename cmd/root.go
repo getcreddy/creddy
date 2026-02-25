@@ -30,7 +30,7 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.creddy/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/creddy/config.yaml)")
 }
 
 func initConfig() {
@@ -40,6 +40,8 @@ func initConfig() {
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
+		// Search order: ~/.config/creddy, ~/.creddy (legacy), current dir
+		viper.AddConfigPath(home + "/.config/creddy")
 		viper.AddConfigPath(home + "/.creddy")
 		viper.AddConfigPath(".")
 		viper.SetConfigType("yaml")
