@@ -106,16 +106,33 @@ type RegistryIndex struct {
 
 // RegistryPlugin represents a plugin in the registry
 type RegistryPlugin struct {
-	Description string                       `json:"description"`
-	Latest      string                       `json:"latest"`
-	Versions    map[string]RegistryVersion   `json:"versions"`
+	Description string                     `json:"description"`
+	Latest      string                     `json:"latest"`
+	Versions    map[string]RegistryVersion `json:"versions"`
 }
 
 // RegistryVersion represents a version of a plugin
 type RegistryVersion struct {
-	URL            string            `json:"url"`
-	SHA256         map[string]string `json:"sha256"`
-	MinCreddy      string            `json:"min_creddy_version"`
+	URL       string            `json:"url"`
+	SHA256    map[string]string `json:"sha256"`
+	MinCreddy string            `json:"min_creddy_version"`
+}
+
+// PluginManifest represents the manifest.json published with each plugin version
+type PluginManifest struct {
+	Name       string           `json:"name"`
+	Version    string           `json:"version"`
+	ReleasedAt string           `json:"released_at"`
+	Binaries   []ManifestBinary `json:"binaries"`
+}
+
+// ManifestBinary represents a binary entry in the plugin manifest
+type ManifestBinary struct {
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Filename string `json:"filename"`
+	SHA256   string `json:"sha256"`
+	URL      string `json:"url"`
 }
 
 func getPluginDir() string {
@@ -208,6 +225,55 @@ func fetchRegistryIndex() (*RegistryIndex, error) {
 	}
 
 	return &index, nil
+}
+
+// fetchPluginManifest fetches the manifest.json for a specific plugin version
+// from the registry. Uses "latest" if version is empty.
+func fetchPluginManifest(name, version string) (*PluginManifest, error) {
+	registry := getRegistry()
+	if version == "" {
+		version = "latest"
+	}
+
+	url := fmt.Sprintf("%s/%s/%s/manifest.json", registry, name, version)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("plugin %s@%s not found in registry", name, version)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registry returned status %d", resp.StatusCode)
+	}
+
+	var manifest PluginManifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	return &manifest, nil
+}
+
+// getBinaryFromManifest finds the binary for the current OS/arch in the manifest
+func getBinaryFromManifest(manifest *PluginManifest) (*ManifestBinary, error) {
+	for _, b := range manifest.Binaries {
+		if b.OS == runtime.GOOS && b.Arch == runtime.GOARCH {
+			return &b, nil
+		}
+	}
+	return nil, fmt.Errorf("no binary for %s/%s in manifest", runtime.GOOS, runtime.GOARCH)
 }
 
 func getInstalledPlugins() (map[string]string, error) {
@@ -469,8 +535,6 @@ func runPluginInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create plugin directory: %w", err)
 	}
 
-	var index *RegistryIndex
-
 	for _, arg := range args {
 		// Check if it's an OCI reference (e.g., ttl.sh/creddy-github:1h)
 		if isOCIReference(arg) {
@@ -496,48 +560,28 @@ func runPluginInstall(cmd *cobra.Command, args []string) error {
 		// Parse name@version
 		name, version := parsePluginSpec(arg)
 
-		// Fetch registry if needed
-		if index == nil {
-			var err error
-			index, err = fetchRegistryIndex()
-			if err != nil {
-				return fmt.Errorf("failed to fetch registry: %w", err)
-			}
-		}
-
-		// Find plugin in registry
-		p, ok := index.Plugins[name]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Plugin not found: %s\n", name)
+		// Fetch plugin manifest from registry
+		// Uses "latest" if no version specified
+		manifest, err := fetchPluginManifest(name, version)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to find plugin %s: %v\n", name, err)
 			continue
 		}
 
-		// Use latest if no version specified
-		if version == "" {
-			version = p.Latest
-		}
-
-		// Get version info
-		v, ok := p.Versions[version]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Version not found: %s@%s\n", name, version)
+		// Find binary for current platform
+		binary, err := getBinaryFromManifest(manifest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Plugin %s: %v\n", name, err)
 			continue
 		}
 
-		// Build URL with OS/arch
-		url := strings.ReplaceAll(v.URL, "{os}", runtime.GOOS)
-		url = strings.ReplaceAll(url, "{arch}", runtime.GOARCH)
-
-		// Get expected checksum
-		checksumKey := runtime.GOOS + "-" + runtime.GOARCH
-		expectedChecksum := v.SHA256[checksumKey]
-
-		if err := installFromURL(url, pluginDir, expectedChecksum); err != nil {
+		// Install from the URL in the manifest
+		if err := installFromURL(binary.URL, pluginDir, binary.SHA256); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to install %s: %v\n", name, err)
 			continue
 		}
 
-		fmt.Printf("✓ Installed %s@%s\n", name, version)
+		fmt.Printf("✓ Installed %s@%s\n", name, manifest.Version)
 	}
 
 	// Tell the server to reload plugins
@@ -679,11 +723,6 @@ func runPluginUpgrade(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	index, err := fetchRegistryIndex()
-	if err != nil {
-		return fmt.Errorf("failed to fetch registry: %w", err)
-	}
-
 	var toUpgrade []string
 
 	if pluginUpgradeAll {
@@ -705,30 +744,31 @@ func runPluginUpgrade(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		p, ok := index.Plugins[name]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Plugin not in registry: %s\n", name)
+		// Fetch latest manifest
+		manifest, err := fetchPluginManifest(name, "latest")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Plugin %s not in registry: %v\n", name, err)
 			continue
 		}
 
-		if currentVersion == p.Latest {
+		if currentVersion == manifest.Version {
 			fmt.Printf("✓ %s is already at latest (%s)\n", name, currentVersion)
 			continue
 		}
 
-		v := p.Versions[p.Latest]
-		url := strings.ReplaceAll(v.URL, "{os}", runtime.GOOS)
-		url = strings.ReplaceAll(url, "{arch}", runtime.GOARCH)
+		// Find binary for current platform
+		binary, err := getBinaryFromManifest(manifest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Plugin %s: %v\n", name, err)
+			continue
+		}
 
-		checksumKey := runtime.GOOS + "-" + runtime.GOARCH
-		expectedChecksum := v.SHA256[checksumKey]
-
-		if err := installFromURL(url, pluginDir, expectedChecksum); err != nil {
+		if err := installFromURL(binary.URL, pluginDir, binary.SHA256); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to upgrade %s: %v\n", name, err)
 			continue
 		}
 
-		fmt.Printf("✓ Upgraded %s: %s → %s\n", name, currentVersion, p.Latest)
+		fmt.Printf("✓ Upgraded %s: %s → %s\n", name, currentVersion, manifest.Version)
 	}
 
 	return nil
