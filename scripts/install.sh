@@ -67,6 +67,21 @@ detect_arch() {
     echo "$ARCH"
 }
 
+# Check if we can use sudo
+can_sudo() {
+    # Check if sudo exists and we can use it
+    if ! has_cmd sudo; then
+        return 1
+    fi
+    # Check if we're in a terminal (can prompt for password)
+    if [ ! -t 0 ]; then
+        # Not a terminal, check if sudo is passwordless
+        sudo -n true 2>/dev/null
+        return $?
+    fi
+    return 0
+}
+
 # Determine install directory
 get_install_dir() {
     if [ -n "$INSTALL_DIR" ]; then
@@ -74,13 +89,26 @@ get_install_dir() {
         return
     fi
     
-    # Try /usr/local/bin first (needs sudo)
-    if [ -w "/usr/local/bin" ] || [ "$(id -u)" = "0" ]; then
+    # Already root
+    if [ "$(id -u)" = "0" ]; then
         echo "/usr/local/bin"
-    else
-        # Fall back to ~/.local/bin (XDG standard, usually already in PATH)
-        echo "$HOME/.local/bin"
+        return
     fi
+    
+    # /usr/local/bin is writable
+    if [ -w "/usr/local/bin" ]; then
+        echo "/usr/local/bin"
+        return
+    fi
+    
+    # Can we use sudo?
+    if can_sudo; then
+        echo "/usr/local/bin"
+        return
+    fi
+    
+    # Fall back to ~/.local/bin
+    echo "$HOME/.local/bin"
 }
 
 # Check if command exists
@@ -237,6 +265,15 @@ main() {
     fi
     echo "  Location: $DEST"
     echo ""
+    
+    # Warn about sudo PATH if installed to ~/.local/bin
+    if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
+        warn "Installed to $INSTALL_DIR (sudo won't find it)"
+        echo "  For 'sudo creddy install', use: sudo $DEST install"
+        echo "  Or reinstall with: sudo sh -c 'curl -fsSL https://get.creddy.dev/install.sh | sh'"
+        echo ""
+    fi
+    
     echo "Get started:"
     echo "  creddy --help"
     echo ""
