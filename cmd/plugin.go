@@ -82,6 +82,12 @@ var pluginInfoCmd = &cobra.Command{
 	RunE:  runPluginInfo,
 }
 
+var pluginOutdatedCmd = &cobra.Command{
+	Use:   "outdated",
+	Short: "Show installed plugins that have updates available",
+	RunE:  runPluginOutdated,
+}
+
 var (
 	pluginListInstalled bool
 	pluginUpgradeAll    bool
@@ -92,6 +98,7 @@ func init() {
 	pluginCmd.AddCommand(pluginListCmd)
 	pluginCmd.AddCommand(pluginInstallCmd)
 	pluginCmd.AddCommand(pluginUpgradeCmd)
+	pluginCmd.AddCommand(pluginOutdatedCmd)
 	pluginCmd.AddCommand(pluginRemoveCmd)
 	pluginCmd.AddCommand(pluginInfoCmd)
 
@@ -769,6 +776,69 @@ func runPluginUpgrade(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("✓ Upgraded %s: %s → %s\n", name, currentVersion, manifest.Version)
+	}
+
+	return nil
+}
+
+func runPluginOutdated(cmd *cobra.Command, args []string) error {
+	installed, err := getInstalledPlugins()
+	if err != nil {
+		return fmt.Errorf("failed to get installed plugins: %w", err)
+	}
+
+	if len(installed) == 0 {
+		fmt.Println("No plugins installed.")
+		return nil
+	}
+
+	type outdatedPlugin struct {
+		name           string
+		currentVersion string
+		latestVersion  string
+	}
+
+	var outdated []outdatedPlugin
+	var upToDate []string
+	var checkFailed []string
+
+	for name, currentVersion := range installed {
+		// Fetch latest manifest for this plugin
+		manifest, err := fetchPluginManifest(name, "latest")
+		if err != nil {
+			checkFailed = append(checkFailed, name)
+			continue
+		}
+
+		if currentVersion != manifest.Version {
+			outdated = append(outdated, outdatedPlugin{
+				name:           name,
+				currentVersion: currentVersion,
+				latestVersion:  manifest.Version,
+			})
+		} else {
+			upToDate = append(upToDate, name)
+		}
+	}
+
+	if len(outdated) == 0 {
+		fmt.Println("All plugins are up to date!")
+		return nil
+	}
+
+	fmt.Printf("%-15s %-12s %-12s\n", "PLUGIN", "INSTALLED", "LATEST")
+	for _, p := range outdated {
+		fmt.Printf("%-15s %-12s %-12s\n", p.name, p.currentVersion, p.latestVersion)
+	}
+
+	if len(outdated) > 0 {
+		fmt.Println()
+		fmt.Println("Run 'creddy plugin upgrade --all' to upgrade all plugins")
+	}
+
+	if len(checkFailed) > 0 {
+		fmt.Println()
+		fmt.Printf("Could not check: %s (not in registry)\n", strings.Join(checkFailed, ", "))
 	}
 
 	return nil
