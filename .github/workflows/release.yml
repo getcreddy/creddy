@@ -45,7 +45,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
           BINARY="${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -ldflags="-s -w -X main.Version=${VERSION}" -o "$BINARY" .
+          go build -ldflags="-s -w -X github.com/getcreddy/creddy/cmd.Version=${VERSION}" -o "$BINARY" .
           sha256sum "$BINARY" > "$BINARY.sha256"
 
       - name: Upload artifact

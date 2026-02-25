@@ -78,8 +78,8 @@ get_install_dir() {
     if [ -w "/usr/local/bin" ] || [ "$(id -u)" = "0" ]; then
         echo "/usr/local/bin"
     else
-        # Fall back to ~/.creddy/bin
-        echo "$HOME/.creddy/bin"
+        # Fall back to ~/.local/bin (XDG standard, usually already in PATH)
+        echo "$HOME/.local/bin"
     fi
 }
 
@@ -150,7 +150,7 @@ add_to_path() {
     esac
     
     if [ -f "$RC_FILE" ]; then
-        if ! grep -q "creddy/bin" "$RC_FILE" 2>/dev/null; then
+        if ! grep -q ".local/bin" "$RC_FILE" 2>/dev/null; then
             echo "" >> "$RC_FILE"
             echo "# Added by Creddy installer" >> "$RC_FILE"
             echo "export PATH=\"$DIR:\$PATH\"" >> "$RC_FILE"
@@ -224,7 +224,7 @@ main() {
     fi
     
     # Add to PATH if needed
-    if [ "$INSTALL_DIR" = "$HOME/.creddy/bin" ]; then
+    if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
         add_to_path "$INSTALL_DIR"
     fi
     
