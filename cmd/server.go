@@ -94,6 +94,7 @@ var serverCmd = &cobra.Command{
 
 		srv, err := server.New(server.Config{
 			DBPath:               dbPath,
+			DataDir:              filepath.Dir(dbPath), // Directory containing the database
 			Domain:               domain,
 			AgentInactivityLimit: agentInactivityLimit,
 			PluginLoader:         pluginLoader,

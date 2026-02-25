@@ -70,6 +70,27 @@ func detectLocalServer() string {
 	return ""
 }
 
+// readLocalAdminToken attempts to read the local admin token for auto-approval
+func readLocalAdminToken() string {
+	// Check common data directories for the admin token
+	paths := []string{
+		"/var/lib/creddy/.admin-token",
+	}
+	
+	// Also check user's home directory
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".creddy", ".admin-token"))
+	}
+	
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
+}
+
 var enrollCmd = &cobra.Command{
 	Use:   "enroll [server-url]",
 	Short: "Enroll this machine as an agent",
@@ -123,8 +144,15 @@ Example:
 			fmt.Printf("Requested permissions: %v\n", scopes)
 		}
 
+		// Try to read local admin token for auto-approval
+		adminToken := readLocalAdminToken()
+		
 		// Submit enrollment request
-		reqBody, _ := json.Marshal(map[string]interface{}{"name": name, "scopes": scopes})
+		reqData := map[string]interface{}{"name": name, "scopes": scopes}
+		if adminToken != "" {
+			reqData["admin_token"] = adminToken
+		}
+		reqBody, _ := json.Marshal(reqData)
 		resp, err := http.Post(serverURL+"/v1/enroll", "application/json", bytes.NewReader(reqBody))
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
@@ -141,9 +169,27 @@ Example:
 			ID     string `json:"id"`
 			Secret string `json:"secret"`
 			Status string `json:"status"`
+			Token  string `json:"token"` // Present if auto-approved
 		}
 		if err := json.Unmarshal(body, &enrollResp); err != nil {
 			return fmt.Errorf("invalid response: %w", err)
+		}
+		
+		// If already approved (local admin token), save and exit
+		if enrollResp.Status == "approved" && enrollResp.Token != "" {
+			fmt.Println("✓ Enrollment approved (local admin)")
+			
+			if err := saveCredentials(serverURL, enrollResp.Token); err != nil {
+				fmt.Printf("Warning: failed to save credentials: %v\n", err)
+				fmt.Printf("Token: %s\n", enrollResp.Token)
+				fmt.Println("Set CREDDY_TOKEN environment variable or add to config manually.")
+			} else {
+				fmt.Println("Credentials saved to ~/.config/creddy/config.yaml")
+			}
+			
+			fmt.Printf("\nYou can now request credentials:\n")
+			fmt.Printf("  creddy get github --ttl 10m\n")
+			return nil
 		}
 
 		fmt.Printf("Enrollment request submitted (ID: %s)\n", enrollResp.ID)

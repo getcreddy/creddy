@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,12 +26,14 @@ type Server struct {
 	pluginLoader         *pluginpkg.Loader
 	domain               string
 	agentInactivityLimit time.Duration
+	localAdminToken      string
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
 
 type Config struct {
 	DBPath               string
+	DataDir              string         // Data directory (for admin token file)
 	Domain               string         // Domain for agent email addresses (e.g., creddy.dev)
 	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
 	PluginLoader         *pluginpkg.Loader // Plugin loader for hot-reload support
@@ -48,14 +52,25 @@ func New(cfg Config) (*Server, error) {
 		domain = "creddy.local"
 	}
 
+	// Generate local admin token
+	localAdminToken := generateToken()
+
 	s := &Server{
 		store:                st,
 		backends:             backend.NewManager(),
 		pluginLoader:         cfg.PluginLoader,
 		domain:               domain,
 		agentInactivityLimit: cfg.AgentInactivityLimit,
+		localAdminToken:      localAdminToken,
 		ctx:                  ctx,
 		cancel:               cancel,
+	}
+
+	// Write local admin token to file for CLI auto-approval
+	if cfg.DataDir != "" {
+		if err := s.writeLocalAdminToken(cfg.DataDir, localAdminToken); err != nil {
+			log.Printf("Warning: failed to write local admin token: %v", err)
+		}
 	}
 
 	// Load backends from database
@@ -70,6 +85,22 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// writeLocalAdminToken writes the admin token to a file for CLI auto-approval.
+// The file is only readable by the owner (mode 0600).
+func (s *Server) writeLocalAdminToken(dataDir, token string) error {
+	tokenPath := filepath.Join(dataDir, ".admin-token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		return err
+	}
+	log.Printf("Local admin token written to %s", tokenPath)
+	return nil
+}
+
+// LocalAdminTokenPath returns the expected path of the admin token file
+func LocalAdminTokenPath(dataDir string) string {
+	return filepath.Join(dataDir, ".admin-token")
 }
 
 func (s *Server) loadBackends() error {
@@ -846,8 +877,9 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name   string   `json:"name"`
-		Scopes []string `json:"scopes"`
+		Name       string   `json:"name"`
+		Scopes     []string `json:"scopes"`
+		AdminToken string   `json:"admin_token,omitempty"` // For local auto-approval
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -869,6 +901,28 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// Validate scopes against installed backends
 	if err := s.validateScopes(req.Scopes); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Check for local admin token - auto-approve if valid
+	if req.AdminToken != "" && req.AdminToken == s.localAdminToken {
+		log.Printf("Local admin enrollment (auto-approved): %s", req.Name)
+		
+		// Create agent directly without pending state
+		token := generateToken()
+		scopesJSON, _ := json.Marshal(req.Scopes)
+		
+		agent, err := s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     agent.ID,
+			"status": "approved",
+			"token":  token,
+		})
 		return
 	}
 
