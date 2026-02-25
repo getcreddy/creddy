@@ -35,12 +35,14 @@ func (pb *PluginBackend) Configure(configJSON string) error {
 		return err
 	}
 
-	// Extract proxy config if present
+	// Extract proxy port if present
 	var cfg struct {
-		Proxy *backend.ProxyConfig `json:"proxy"`
+		ProxyPort int `json:"proxy_port"`
 	}
-	if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Proxy != nil {
-		pb.proxyConfig = cfg.Proxy
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.ProxyPort > 0 {
+		pb.proxyConfig = &backend.ProxyConfig{
+			PluginProxyPort: cfg.ProxyPort,
+		}
 	}
 
 	pb.configured = true

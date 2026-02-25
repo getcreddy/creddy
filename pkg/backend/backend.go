@@ -40,12 +40,9 @@ type RevocableBackend interface {
 
 // ProxyConfig holds configuration for proxy-mode backends
 type ProxyConfig struct {
-	// UpstreamURL is the base URL of the external API
-	UpstreamURL string `json:"upstream_url"`
-	// HeaderName is the header name for the credential (default: Authorization)
-	HeaderName string `json:"header_name"`
-	// HeaderPrefix is the prefix for the credential value (e.g., "Bearer ")
-	HeaderPrefix string `json:"header_prefix"`
+	// PluginProxyPort is the port where the plugin's proxy server listens
+	// Creddy routes /v1/proxy/{backend}/* to localhost:PluginProxyPort/*
+	PluginProxyPort int `json:"proxy_port"`
 }
 
 // ProxyBackend is for backends that support proxy mode

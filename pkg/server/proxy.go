@@ -2,59 +2,16 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/backend"
 )
-
-// proxyCredentialCache caches credentials per agent/backend to avoid
-// creating a new credential for every proxied request
-type proxyCredentialCache struct {
-	mu    sync.RWMutex
-	cache map[string]*cachedCred
-}
-
-type cachedCred struct {
-	token     string
-	expiresAt time.Time
-}
-
-var credCache = &proxyCredentialCache{
-	cache: make(map[string]*cachedCred),
-}
-
-func (c *proxyCredentialCache) get(key string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	
-	cred, ok := c.cache[key]
-	if !ok {
-		return "", false
-	}
-	
-	// Check if expired (with 30s buffer)
-	if time.Now().Add(30 * time.Second).After(cred.expiresAt) {
-		return "", false
-	}
-	
-	return cred.token, true
-}
-
-func (c *proxyCredentialCache) set(key, token string, expiresAt time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	
-	c.cache[key] = &cachedCred{
-		token:     token,
-		expiresAt: expiresAt,
-	}
-}
 
 // RegisterProxyRoutes adds proxy endpoints to the mux
 func (s *Server) RegisterProxyRoutes(mux *http.ServeMux) {
@@ -62,7 +19,9 @@ func (s *Server) RegisterProxyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/proxy/", s.handleProxy)
 }
 
-// handleProxy handles all proxy requests
+// handleProxy routes requests to plugin proxies
+// Creddy's proxy is a passthrough - it validates the agent and routes to the plugin's proxy
+// The plugin proxy handles the actual upstream API communication
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Parse path: /v1/proxy/{backend}/{path...}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/proxy/")
@@ -71,149 +30,91 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing backend in proxy path")
 		return
 	}
-	
+
 	backendName := parts[0]
-	upstreamPath := ""
+	remainingPath := "/"
 	if len(parts) > 1 {
-		upstreamPath = "/" + parts[1]
+		remainingPath = "/" + parts[1]
 	}
-	
-	// Validate agent token
-	token := extractBearerToken(r)
-	if token == "" {
-		// Also check x-api-key header (common for AI APIs)
-		token = r.Header.Get("x-api-key")
-	}
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing authorization")
-		return
-	}
-	
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
-		return
-	}
-	
-	// Check agent has permission for this backend
-	if !agentCanAccessBackend(agent, backendName, nil, nil, false) {
-		writeError(w, http.StatusForbidden, "agent not authorized for backend: "+backendName)
-		return
-	}
-	
-	// Get backend
+
+	// Get backend to find proxy config
 	b, err := s.backends.Get(backendName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "backend not found: "+backendName)
 		return
 	}
-	
+
 	// Check if backend supports proxy mode
 	pb, ok := b.(backend.ProxyBackend)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "backend does not support proxy mode: "+backendName)
 		return
 	}
-	
+
 	proxyConfig := pb.ProxyConfig()
-	if proxyConfig.UpstreamURL == "" {
-		writeError(w, http.StatusInternalServerError, "backend proxy not configured")
+	if proxyConfig.PluginProxyPort == 0 {
+		writeError(w, http.StatusBadRequest, "backend proxy not configured: "+backendName)
 		return
 	}
-	
-	// Get or create credential for this agent/backend
-	cacheKey := fmt.Sprintf("%s:%s", agent.ID, backendName)
-	credential, ok := credCache.get(cacheKey)
-	if !ok {
-		// Create new credential
-		tokenReq := backend.TokenRequest{
-			TTL: 10 * time.Minute,
-		}
-		
-		cred, err := b.GetToken(tokenReq)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to get credential: "+err.Error())
-			return
-		}
-		
-		credential = cred.Value
-		credCache.set(cacheKey, cred.Value, cred.ExpiresAt)
-		
-		// Record credential issuance
-		s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), "", "proxy", cred.ExpiresAt)
-		s.store.UpdateAgentLastUsed(agent.ID)
-	}
-	
-	// Build upstream request
-	upstreamURL := proxyConfig.UpstreamURL + upstreamPath
+
+	// Build plugin proxy URL
+	pluginProxyURL := fmt.Sprintf("http://localhost:%d%s", proxyConfig.PluginProxyPort, remainingPath)
 	if r.URL.RawQuery != "" {
-		upstreamURL += "?" + r.URL.RawQuery
+		pluginProxyURL += "?" + r.URL.RawQuery
 	}
-	
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
-	
-	upstreamReq, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, r.Body)
+
+	// Create request to plugin proxy
+	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, pluginProxyURL, r.Body)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create upstream request")
+		log.Printf("Failed to create proxy request: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create proxy request")
 		return
 	}
-	
-	// Copy headers (except auth headers we'll set ourselves)
+
+	// Copy all headers (plugin proxy handles auth)
 	for k, vv := range r.Header {
 		k = http.CanonicalHeaderKey(k)
-		if k == "Authorization" || k == "X-Api-Key" || k == "Host" {
+		if k == "Host" {
 			continue
 		}
 		for _, v := range vv {
-			upstreamReq.Header.Add(k, v)
+			proxyReq.Header.Add(k, v)
 		}
 	}
-	
-	// Set credential header
-	headerName := proxyConfig.HeaderName
-	if headerName == "" {
-		headerName = "Authorization"
-	}
-	headerValue := credential
-	if proxyConfig.HeaderPrefix != "" {
-		headerValue = proxyConfig.HeaderPrefix + credential
-	}
-	upstreamReq.Header.Set(headerName, headerValue)
-	
-	// Make request
+
+	// Make request to plugin proxy
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
 	}
-	
-	resp, err := client.Do(upstreamReq)
+
+	resp, err := client.Do(proxyReq)
 	if err != nil {
-		log.Printf("Proxy error for %s: %v", backendName, err)
-		writeError(w, http.StatusBadGateway, "upstream request failed")
+		log.Printf("Plugin proxy request failed for %s: %v", backendName, err)
+		writeError(w, http.StatusBadGateway, "plugin proxy unavailable")
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	// Copy response headers
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
 	}
-	
-	// Check if this is a streaming response (SSE)
-	isStreaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
-	
+
 	w.WriteHeader(resp.StatusCode)
-	
-	if isStreaming {
-		// Stream the response with flushing
+
+	// Check if streaming (SSE)
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			io.Copy(w, resp.Body)
 			return
 		}
-		
+
 		buf := make([]byte, 4096)
 		for {
 			n, err := resp.Body.Read(buf)
@@ -228,4 +129,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	} else {
 		io.Copy(w, resp.Body)
 	}
+}
+
+// extractProxyPort gets the plugin proxy port from backend config
+func extractProxyPort(configJSON string) int {
+	var cfg struct {
+		ProxyPort int `json:"proxy_port"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return 0
+	}
+	return cfg.ProxyPort
 }
