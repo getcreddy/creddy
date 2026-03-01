@@ -266,3 +266,51 @@ func (l *Loader) Reload() ([]string, error) {
 
 	return loaded, nil
 }
+
+// LoadFromDirectories loads plugins from multiple directories
+func LoadFromDirectories(dirs []string, logger hclog.Logger) *Loader {
+	// Use system dir as primary
+	primaryDir := "/usr/local/lib/creddy/plugins"
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err == nil {
+			primaryDir = dir
+			break
+		}
+	}
+	
+	loader := NewLoader(primaryDir)
+	if logger != nil {
+		loader.SetLogger(logger)
+	}
+	
+	// Load from all directories
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			// Skip if already loaded
+			if _, exists := loader.plugins[name]; exists {
+				continue
+			}
+			// Try to load
+			pluginPath := filepath.Join(dir, name)
+			if _, err := loader.LoadPlugin(pluginPath); err != nil {
+				// Log but continue
+				continue
+			}
+		}
+	}
+	
+	return loader
+}

@@ -24,9 +24,6 @@ var keysListCmd = &cobra.Command{
 	Long:  `List all agent public keys. These can be added to GitHub for commit signature verification.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := viper.GetString("admin.url")
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400"
-		}
 
 		resp, err := http.Get(serverURL + "/v1/admin/keys")
 		if err != nil {
@@ -68,9 +65,6 @@ var keysExportCmd = &cobra.Command{
 	Long:  `Export all agent public keys in a format suitable for adding to GitHub.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := viper.GetString("admin.url")
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400"
-		}
 
 		resp, err := http.Get(serverURL + "/v1/admin/keys")
 		if err != nil {
@@ -104,12 +98,10 @@ var keysGetCmd = &cobra.Command{
 	Short: "Get your signing key (for agents)",
 	Long:  `Fetch your agent's signing key for git commit signing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		serverURL := viper.GetString("url")
+		flagServer, _ := cmd.Flags().GetString("server")
+		serverURL := getServerURL(flagServer)
 		token := viper.GetString("token")
 
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400" // default to local
-		}
 		if token == "" {
 			if token == "" {
 			return fmt.Errorf("not enrolled. Run 'creddy init <server-url>' first")

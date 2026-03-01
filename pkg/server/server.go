@@ -238,6 +238,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/backends", s.handleCreateBackend)
 	mux.HandleFunc("DELETE /v1/admin/backends/{name}", s.handleDeleteBackend)
 	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
+	mux.HandleFunc("GET /v1/admin/tokens", s.handleListAllTokens)
+	mux.HandleFunc("DELETE /v1/admin/tokens/{id}", s.handleAdminRevokeToken)
 	mux.HandleFunc("GET /v1/admin/keys", s.handleListPublicKeys)
 	mux.HandleFunc("GET /v1/admin/pending", s.handleListPending)
 	mux.HandleFunc("POST /v1/admin/pending/{id}/approve", s.handleApprovePending)
@@ -247,6 +249,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Enrollment endpoints (new PKI-based auth)
 	s.RegisterEnrollmentRoutes(mux)
+
+	// Proxy endpoints (for backends that support proxy mode)
+	s.RegisterProxyRoutes(mux)
+
+	// Auth relay endpoints (for @creddy/auth CLI)
 
 	return s.withMiddleware(mux)
 }
@@ -1353,4 +1360,79 @@ func agentCanAccessBackend(agent *store.Agent, backendName string, repos []strin
 	}
 
 	return false
+}
+
+// handleListAllTokens lists all active tokens (admin)
+func (s *Server) handleListAllTokens(w http.ResponseWriter, r *http.Request) {
+	backend := r.URL.Query().Get("backend")
+	agentName := r.URL.Query().Get("agent")
+
+	creds, err := s.store.ListActiveCredentials()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list tokens")
+		return
+	}
+
+	// Filter and enrich with agent names
+	type tokenInfo struct {
+		ID        string    `json:"id"`
+		AgentID   string    `json:"agent_id"`
+		AgentName string    `json:"agent_name"`
+		Backend   string    `json:"backend"`
+		ExpiresAt time.Time `json:"expires_at"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	results := []tokenInfo{}
+	for _, c := range creds {
+		// Filter by backend
+		if backend != "" && c.Backend != backend {
+			continue
+		}
+
+		// Get agent name
+		agent, _ := s.store.GetAgentByID(c.AgentID)
+		name := ""
+		if agent != nil {
+			name = agent.Name
+			// Filter by agent name
+			if agentName != "" && name != agentName {
+				continue
+			}
+		}
+
+		results = append(results, tokenInfo{
+			ID:        c.ID,
+			AgentID:   c.AgentID,
+			AgentName: name,
+			Backend:   c.Backend,
+			ExpiresAt: c.ExpiresAt,
+			CreatedAt: c.CreatedAt,
+		})
+	}
+
+	json.NewEncoder(w).Encode(results)
+}
+
+// handleAdminRevokeToken revokes a token by ID (admin)
+func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	cred, err := s.store.GetActiveCredential(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "token not found")
+		return
+	}
+
+	// Revoke from backend if supported
+	if cred.ExternalID != "" {
+		s.revokeCredentialFromBackend(cred.Backend, cred.ExternalID)
+	}
+
+	if err := s.store.DeleteActiveCredential(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

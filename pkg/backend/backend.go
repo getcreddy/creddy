@@ -38,6 +38,22 @@ type RevocableBackend interface {
 	RevokeToken(externalID string) error
 }
 
+// ProxyConfig holds configuration for proxy-mode backends
+type ProxyConfig struct {
+	// PluginProxyPort is the port where the plugin's proxy server listens
+	// Creddy routes /v1/proxy/{backend}/* to localhost:PluginProxyPort/*
+	PluginProxyPort int `json:"proxy_port"`
+}
+
+// ProxyBackend is for backends that support proxy mode
+// In proxy mode, Creddy forwards requests to the upstream API,
+// injecting the real credential automatically
+type ProxyBackend interface {
+	Backend
+	// ProxyConfig returns the configuration for proxy mode
+	ProxyConfig() ProxyConfig
+}
+
 // Manager handles multiple backends
 type Manager struct {
 	backends map[string]Backend

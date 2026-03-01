@@ -17,12 +17,10 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List active credentials",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		serverURL := viper.GetString("url")
+		flagServer, _ := cmd.Flags().GetString("server")
+		serverURL := getServerURL(flagServer)
 		token := viper.GetString("token")
 
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400" // default to local
-		}
 		if token == "" {
 			if token == "" {
 			return fmt.Errorf("not enrolled. Run 'creddy init <server-url>' first")

@@ -50,25 +50,6 @@ func formatEnrollError(errMsg string) string {
 	return errMsg
 }
 
-// detectLocalServer checks if a creddy server is running locally
-func detectLocalServer() string {
-	localURLs := []string{
-		"http://127.0.0.1:8400",
-		"http://localhost:8400",
-	}
-	
-	client := &http.Client{Timeout: 2 * time.Second}
-	for _, url := range localURLs {
-		resp, err := client.Get(url + "/health")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return url
-			}
-		}
-	}
-	return ""
-}
 
 // readLocalAdminToken attempts to read the local admin token for auto-approval
 func readLocalAdminToken() string {

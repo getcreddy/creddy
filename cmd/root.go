@@ -11,6 +11,7 @@ import (
 var cfgFile string
 
 var rootCmd = &cobra.Command{
+	Version: Version,
 	Use:   "creddy",
 	Short: "Ephemeral credentials for AI agents",
 	Long: `Creddy is a central identity service that provides scoped, 

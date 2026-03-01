@@ -21,12 +21,10 @@ Example:
   creddy status --server http://creddy:8400`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		serverURL, _ := cmd.Flags().GetString("server")
+		flagServer, _ := cmd.Flags().GetString("server")
+		serverURL := getServerURL(flagServer)
 		if serverURL == "" {
-			serverURL = viper.GetString("url")
-		}
-		if serverURL == "" {
-			return fmt.Errorf("server URL required (--server or CREDDY_URL)")
+			return fmt.Errorf("server URL required (--server or CREDDY_URL)\nNo local server detected at localhost:8400")
 		}
 
 		token := viper.GetString("token")

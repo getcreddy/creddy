@@ -162,6 +162,10 @@ func getSystemPluginDir() string {
 // getPluginDir returns the directory where plugins should be installed.
 // For installs, this is the user plugin directory by default.
 func getPluginDir() string {
+	// If running as root, use system dir
+	if os.Getuid() == 0 {
+		return getSystemPluginDir()
+	}
 	if envDir := os.Getenv("CREDDY_PLUGIN_DIR"); envDir != "" {
 		return envDir
 	}
