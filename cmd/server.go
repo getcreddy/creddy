@@ -97,6 +97,10 @@ var serverCmd = &cobra.Command{
 			}
 		}
 
+		// Set server version for health endpoint
+		server.ServerVersion = Version
+		server.ServerCommit = Commit
+
 		srv, err := server.New(server.Config{
 			DBPath:               dbPath,
 			DataDir:              filepath.Dir(dbPath), // Directory containing the database

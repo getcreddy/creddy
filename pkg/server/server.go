@@ -271,10 +271,39 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
+// ServerVersion is set by main to expose version info to health endpoint
+var ServerVersion = "dev"
+var ServerCommit = "unknown"
+var ServerStartTime = time.Now()
 
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Get counts
+	agents, _ := s.store.ListAgents()
+	backends := s.backends.List()
+	pending, _ := s.store.ListPendingEnrollments()
+	
+	// Get plugin info
+	var plugins []string
+	if s.pluginLoader != nil {
+		for _, p := range s.pluginLoader.ListPlugins() {
+			plugins = append(plugins, p.Info.Name)
+		}
+	}
+
+	response := map[string]interface{}{
+		"status":   "ok",
+		"version":  ServerVersion,
+		"commit":   ServerCommit,
+		"uptime":   time.Since(ServerStartTime).Round(time.Second).String(),
+		"agents":   len(agents),
+		"backends": len(backends),
+		"pending":  len(pending),
+		"plugins":  plugins,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
 func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	backendName := r.PathValue("backend")
 	token := extractBearerToken(r)
