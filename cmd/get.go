@@ -41,10 +41,8 @@ Examples:
 		readOnly, _ := cmd.Flags().GetBool("read-only")
 		outputJSON, _ := cmd.Flags().GetBool("json")
 
-		serverURL := viper.GetString("url")
-		if serverURL == "" {
-			serverURL = "http://127.0.0.1:8400"
-		}
+		flagServer, _ := cmd.Flags().GetString("server")
+		serverURL := getServerURL(flagServer)
 		
 		token := viper.GetString("token")
 		if token == "" {
