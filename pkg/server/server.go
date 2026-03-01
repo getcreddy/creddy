@@ -27,7 +27,6 @@ type Server struct {
 	domain               string
 	agentInactivityLimit time.Duration
 	localAdminToken      string
-	authRelayStore       *AuthRelayStore
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
@@ -63,7 +62,6 @@ func New(cfg Config) (*Server, error) {
 		domain:               domain,
 		agentInactivityLimit: cfg.AgentInactivityLimit,
 		localAdminToken:      localAdminToken,
-		authRelayStore:       NewAuthRelayStore(),
 		ctx:                  ctx,
 		cancel:               cancel,
 	}
@@ -254,7 +252,6 @@ func (s *Server) Handler() http.Handler {
 	s.RegisterProxyRoutes(mux)
 
 	// Auth relay endpoints (for @creddy/auth CLI)
-	s.RegisterAuthRelayRoutes(mux, s.authRelayStore)
 
 	return s.withMiddleware(mux)
 }
