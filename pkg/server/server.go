@@ -18,6 +18,7 @@ import (
 	pluginpkg "github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/getcreddy/creddy/pkg/signing"
 	"github.com/getcreddy/creddy/pkg/store"
+	"github.com/getcreddy/creddy/pkg/policy"
 )
 
 type Server struct {
@@ -27,6 +28,7 @@ type Server struct {
 	domain               string
 	agentInactivityLimit time.Duration
 	localAdminToken      string
+	policyEngine         *policy.Engine
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
@@ -37,6 +39,7 @@ type Config struct {
 	Domain               string         // Domain for agent email addresses (e.g., creddy.dev)
 	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
 	PluginLoader         *pluginpkg.Loader // Plugin loader for hot-reload support
+	PolicyEngine         *policy.Engine
 }
 
 func New(cfg Config) (*Server, error) {
@@ -62,6 +65,7 @@ func New(cfg Config) (*Server, error) {
 		domain:               domain,
 		agentInactivityLimit: cfg.AgentInactivityLimit,
 		localAdminToken:      localAdminToken,
+		policyEngine:         cfg.PolicyEngine,
 		ctx:                  ctx,
 		cancel:               cancel,
 	}
@@ -82,6 +86,7 @@ func New(cfg Config) (*Server, error) {
 	go s.reapExpiredCredentials()
 	if s.agentInactivityLimit > 0 {
 		go s.reapInactiveAgents()
+	go s.reapExpiredPolicyAgents()
 	}
 
 	return s, nil
@@ -911,6 +916,44 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+
+	// Check auto-approval policies
+	if s.policyEngine != nil {
+		result := s.policyEngine.Evaluate(req.Name, req.Scopes)
+		if result.AutoApprove {
+			log.Printf("Policy auto-approved enrollment: %s (policy: %s)", req.Name, result.PolicyName)
+			
+			token := generateToken()
+			scopesJSON, _ := json.Marshal(req.Scopes)
+			
+			// Calculate agent expiry if set
+			var expiresAt *time.Time
+			if result.MaxAgentLifetime > 0 {
+				t := time.Now().Add(result.MaxAgentLifetime)
+				expiresAt = &t
+			}
+			
+			agent, err := s.store.CreateAgentWithPolicy(req.Name, hashToken(token), string(scopesJSON), result.PolicyName, expiresAt)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
+				return
+			}
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":         agent.ID,
+				"status":     "approved",
+				"token":      token,
+				"policy":     result.PolicyName,
+				"expires_at": expiresAt,
+			})
+			return
+		}
+		// If policy matched but didn't auto-approve, log the reason
+		if result.PolicyName != "" {
+			log.Printf("Policy '%s' requires manual approval for %s: %s", result.PolicyName, req.Name, result.DenyReason)
+		}
+	}
+
 	// Check for local admin token - auto-approve if valid
 	if req.AdminToken != "" && req.AdminToken == s.localAdminToken {
 		log.Printf("Local admin enrollment (auto-approved): %s", req.Name)
@@ -1435,4 +1478,30 @@ func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reapExpiredPolicyAgents removes agents whose policy-based lifetime has expired
+func (s *Server) reapExpiredPolicyAgents() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			agents, err := s.store.GetExpiredPolicyAgents()
+			if err != nil {
+				log.Printf("Error getting expired policy agents: %v", err)
+				continue
+			}
+			for _, agent := range agents {
+				log.Printf("Unenrolling expired policy agent: %s (policy: %s, expired: %v)", 
+					agent.Name, *agent.PolicyName, agent.ExpiresAt)
+				if err := s.store.DeleteAgent(agent.ID); err != nil {
+					log.Printf("Error deleting expired agent %s: %v", agent.Name, err)
+				}
+			}
+		}
+	}
 }

@@ -19,6 +19,8 @@ type Agent struct {
 	Scopes    string // JSON array
 	CreatedAt time.Time
 	LastUsed  *time.Time
+	PolicyName *string
+	ExpiresAt  *time.Time
 }
 
 type Backend struct {
@@ -109,6 +111,9 @@ func (s *Store) migrate() error {
 
 	// Add external_id column if it doesn't exist (for revocable backends)
 	s.db.Exec(`ALTER TABLE active_credentials ADD COLUMN external_id TEXT`)
+	// Add policy columns to agents
+	s.db.Exec(`ALTER TABLE agents ADD COLUMN policy_name TEXT`)
+	s.db.Exec(`ALTER TABLE agents ADD COLUMN expires_at DATETIME`)
 
 	return nil
 }
@@ -136,12 +141,25 @@ func (s *Store) CreateAgent(name, tokenHash, scopes string) (*Agent, error) {
 	return s.GetAgentByID(id)
 }
 
+func (s *Store) CreateAgentWithPolicy(name, tokenHash, scopes, policyName string, expiresAt *time.Time) (*Agent, error) {
+	id := uuid.New().String()
+	_, err := s.db.Exec(
+		`INSERT INTO agents (id, name, token_hash, scopes, policy_name, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, name, tokenHash, scopes, policyName, expiresAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.GetAgentByID(id)
+}
+
 func (s *Store) GetAgentByID(id string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used FROM agents WHERE id = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE id = ?`,
 		id,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +169,9 @@ func (s *Store) GetAgentByID(id string) (*Agent, error) {
 func (s *Store) GetAgentByName(name string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used FROM agents WHERE name = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE name = ?`,
 		name,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -163,9 +181,9 @@ func (s *Store) GetAgentByName(name string) (*Agent, error) {
 func (s *Store) GetAgentByTokenHash(hash string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used FROM agents WHERE token_hash = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE token_hash = ?`,
 		hash,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +191,7 @@ func (s *Store) GetAgentByTokenHash(hash string) (*Agent, error) {
 }
 
 func (s *Store) ListAgents() ([]*Agent, error) {
-	rows, err := s.db.Query(`SELECT id, name, token_hash, scopes, created_at, last_used FROM agents ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +200,7 @@ func (s *Store) ListAgents() ([]*Agent, error) {
 	var agents []*Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt); err != nil {
 			return nil, err
 		}
 		agents = append(agents, &a)
@@ -426,4 +444,27 @@ func (s *Store) GetAllCredentialsByAgent(agentID string) ([]*ActiveCredential, e
 func (s *Store) DeleteAllCredentialsByAgent(agentID string) error {
 	_, err := s.db.Exec(`DELETE FROM active_credentials WHERE agent_id = ?`, agentID)
 	return err
+}
+
+// GetExpiredPolicyAgents returns agents whose policy-based expires_at has passed
+func (s *Store) GetExpiredPolicyAgents() ([]*Agent, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at 
+		 FROM agents 
+		 WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var agents []*Agent
+	for rows.Next() {
+		var a Agent
+		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt); err != nil {
+			return nil, err
+		}
+		agents = append(agents, &a)
+	}
+	return agents, nil
 }

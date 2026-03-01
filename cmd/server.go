@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/plugin"
+	"log"
+	"github.com/getcreddy/creddy/pkg/config"
+	"github.com/getcreddy/creddy/pkg/policy"
 	"github.com/getcreddy/creddy/pkg/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -80,12 +83,27 @@ var serverCmd = &cobra.Command{
 			}
 		}
 
+
+		// Load policies from config
+		var policyEngine *policy.Engine
+		configPath := viper.ConfigFileUsed()
+		if configPath != "" {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				log.Printf("Warning: failed to load config: %v", err)
+			} else if len(cfg.Policies) > 0 {
+				policyEngine = policy.NewEngine(cfg.Policies)
+				fmt.Printf("Loaded %d auto-approval policies\n", len(cfg.Policies))
+			}
+		}
+
 		srv, err := server.New(server.Config{
 			DBPath:               dbPath,
 			DataDir:              filepath.Dir(dbPath), // Directory containing the database
 			Domain:               domain,
 			AgentInactivityLimit: agentInactivityLimit,
 			PluginLoader:         pluginLoader,
+			PolicyEngine:         policyEngine,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to start server: %w", err)
