@@ -200,6 +200,8 @@ func getRegistry() string {
 
 // triggerPluginReload tells the running server to reload plugins.
 // If the server isn't reachable, it prints a message suggesting a restart.
+// triggerPluginReload tells the running server to reload plugins.
+// If the server isn't reachable, it prints a helpful message.
 func triggerPluginReload() {
 	serverURL := viper.GetString("admin.url")
 	if serverURL == "" {
@@ -211,13 +213,24 @@ func triggerPluginReload() {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", serverURL+"/v1/admin/plugins/reload", bytes.NewReader(nil))
 	if err != nil {
-		fmt.Println("Note: Restart the creddy server to load the new plugin")
+		fmt.Printf("Note: Server not reachable. Run 'creddy server reload-plugins' after starting.\n")
 		return
+	}
+
+	// Try to add admin token if available
+	dataDir := viper.GetString("data-dir")
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = filepath.Join(home, ".creddy")
+	}
+	tokenPath := filepath.Join(dataDir, ".admin-token")
+	if tokenBytes, err := os.ReadFile(tokenPath); err == nil {
+		req.Header.Set("Authorization", "Bearer "+string(tokenBytes))
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Println("Note: Restart the creddy server to load the new plugin")
+		fmt.Printf("Note: Server not running. Plugin will load on next start.\n")
 		return
 	}
 	defer resp.Body.Close()
@@ -229,11 +242,14 @@ func triggerPluginReload() {
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
 			if len(result.Loaded) > 0 {
-				fmt.Printf("Server reloaded: %d new plugin(s) loaded\n", len(result.Loaded))
+				fmt.Printf("✓ Server reloaded %d plugin(s)\n", len(result.Loaded))
+			} else {
+				fmt.Println("✓ Server notified (plugin already loaded or no changes)")
 			}
 		}
 	} else {
-		fmt.Println("Note: Restart the creddy server to load the new plugin")
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Note: Reload failed (%d): %s\n", resp.StatusCode, string(body))
 	}
 }
 
