@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -59,28 +58,17 @@ var serverCmd = &cobra.Command{
 		if configDir := viper.GetString("plugin.dir"); configDir != "" {
 			pluginDirs = append(pluginDirs, configDir)
 		}
+		// System plugins first (higher priority)
+		pluginDirs = append(pluginDirs, "/usr/local/lib/creddy/plugins")
 		// User plugins
 		if home, err := os.UserHomeDir(); err == nil {
 			pluginDirs = append(pluginDirs, filepath.Join(home, ".local", "share", "creddy", "plugins"))
 		}
-		// System plugins
-		pluginDirs = append(pluginDirs, "/usr/local/lib/creddy/plugins")
 		
-		// Use the first existing directory, or the system dir as fallback
-		pluginDir := "/usr/local/lib/creddy/plugins"
-		for _, dir := range pluginDirs {
-			if _, err := os.Stat(dir); err == nil {
-				pluginDir = dir
-				break
-			}
-		}
-
-		pluginLoader := plugin.NewLoader(pluginDir)
-		if err := pluginLoader.LoadAllPlugins(); err != nil {
-			log.Printf("Warning: failed to load plugins: %v", err)
-		}
+		pluginLoader := plugin.LoadFromDirectories(pluginDirs, nil)
 
 		// Register plugin loader as the default
+		plugin.NewLoaderBridge(pluginLoader).Register()
 		plugin.NewLoaderBridge(pluginLoader).Register()
 
 		// Log loaded plugins
