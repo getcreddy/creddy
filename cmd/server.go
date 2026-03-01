@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -125,13 +126,31 @@ var serverCmd = &cobra.Command{
 			srv.Close()
 			os.Exit(0)
 		}()
-
-		fmt.Printf("Starting creddy server on %s\n", listen)
 		fmt.Printf("Database: %s\n", dbPath)
 		if agentInactivityLimit > 0 {
 			fmt.Printf("Agent inactivity limit: %v\n", agentInactivityLimit)
 		}
-		return http.ListenAndServe(listen, srv.Handler())
+
+		handler := srv.Handler()
+		errCh := make(chan error, 2)
+
+		// Always listen on localhost for local CLI access
+		localAddr := "127.0.0.1:8400"
+		if listen != localAddr && !strings.HasPrefix(listen, "127.0.0.1:") {
+			go func() {
+				fmt.Printf("Listening on %s (local admin)\n", localAddr)
+				errCh <- http.ListenAndServe(localAddr, handler)
+			}()
+		}
+
+		// Listen on configured address
+		go func() {
+			fmt.Printf("Listening on %s\n", listen)
+			errCh <- http.ListenAndServe(listen, handler)
+		}()
+
+		// Wait for either to fail
+		return <-errCh
 	},
 }
 
