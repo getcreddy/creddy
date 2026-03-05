@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/getcreddy/creddy/pkg/logger"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,13 +73,13 @@ func New(cfg Config) (*Server, error) {
 	// Write local admin token to file for CLI auto-approval
 	if cfg.DataDir != "" {
 		if err := s.writeLocalAdminToken(cfg.DataDir, localAdminToken); err != nil {
-			log.Printf("Warning: failed to write local admin token: %v", err)
+			logger.Warn("failed to write local admin token", "error", err)
 		}
 	}
 
 	// Load backends from database
 	if err := s.loadBackends(); err != nil {
-		log.Printf("Warning: failed to load backends: %v", err)
+		logger.Warn("failed to load backends", "error", err)
 	}
 
 	// Start the reapers
@@ -99,7 +99,7 @@ func (s *Server) writeLocalAdminToken(dataDir, token string) error {
 	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
 		return err
 	}
-	log.Printf("Local admin token written to %s", tokenPath)
+	logger.Debug("local admin token written", "path", tokenPath)
 	return nil
 }
 
@@ -117,11 +117,11 @@ func (s *Server) loadBackends() error {
 	for _, b := range backends {
 		backend, err := backend.LoadFromConfig(b.Type, b.Config)
 		if err != nil {
-			log.Printf("Warning: failed to load backend %s: %v", b.Name, err)
+			logger.Warn("failed to load backend", "name", b.Name, "error", err)
 			continue
 		}
 		s.backends.Register(b.Name, backend)
-		log.Printf("Loaded backend: %s (%s)", b.Name, b.Type)
+		logger.Info("loaded backend", "name", b.Name, "type", b.Type)
 	}
 
 	return nil
@@ -139,7 +139,7 @@ func (s *Server) reapExpiredCredentials() {
 			// Get expired credentials to revoke them first
 			expired, err := s.store.GetExpiredCredentials()
 			if err != nil {
-				log.Printf("Error getting expired credentials: %v", err)
+				logger.Error("error getting expired credentials", "error", err)
 				continue
 			}
 
@@ -153,9 +153,9 @@ func (s *Server) reapExpiredCredentials() {
 			// Delete from database
 			deleted, err := s.store.DeleteExpiredCredentials()
 			if err != nil {
-				log.Printf("Error reaping expired credentials: %v", err)
+				logger.Error("error reaping expired credentials", "error", err)
 			} else if deleted > 0 {
-				log.Printf("Reaped %d expired credentials", deleted)
+				logger.Debug("reaped expired credentials", "count", deleted)
 			}
 		}
 	}
@@ -165,15 +165,15 @@ func (s *Server) reapExpiredCredentials() {
 func (s *Server) revokeCredentialFromBackend(backendName, externalID string) {
 	b, err := s.backends.Get(backendName)
 	if err != nil {
-		log.Printf("Warning: backend %s not found for revocation", backendName)
+		logger.Warn("backend not found for revocation", "name", backendName)
 		return
 	}
 
 	if rb, ok := b.(backend.RevocableBackend); ok {
 		if err := rb.RevokeToken(externalID); err != nil {
-			log.Printf("Warning: failed to revoke %s credential: %v", backendName, err)
+			logger.Warn("failed to revoke credential", "backend", backendName, "error", err)
 		} else {
-			log.Printf("Revoked %s credential", backendName)
+			logger.Debug("revoked credential", "backend", backendName)
 		}
 	}
 }
@@ -190,9 +190,9 @@ func (s *Server) reapInactiveAgents() {
 		case <-ticker.C:
 			deleted, err := s.store.DeleteInactiveAgents(s.agentInactivityLimit)
 			if err != nil {
-				log.Printf("Error reaping inactive agents: %v", err)
+				logger.Error("error reaping inactive agents", "error", err)
 			} else if deleted > 0 {
-				log.Printf("Reaped %d inactive agents (no activity in %v)", deleted, s.agentInactivityLimit)
+				logger.Info("reaped inactive agents", "count", deleted, "limit", s.agentInactivityLimit)
 			}
 		}
 	}
@@ -266,7 +266,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		log.Printf("%s %s", r.Method, r.URL.Path)
+		logger.Debug("request", "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -396,7 +396,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 	scopes := r.URL.Query().Get("scope")
 	activeCred, err := s.store.CreateActiveCredential(agent.ID, backendName, hashToken(cred.Value), externalID, scopes, expiresAt)
 	if err != nil {
-		log.Printf("Warning: failed to record credential: %v", err)
+		logger.Warn("failed to record credential", "error", err)
 	}
 
 	// Update agent last used
@@ -540,11 +540,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	// Generate GPG signing key for the agent
 	keyPair, err := signing.GenerateKeyPair(req.Name, s.domain)
 	if err != nil {
-		log.Printf("Warning: failed to generate signing key for agent %s: %v", req.Name, err)
+		logger.Warn("failed to generate signing key", "agent", req.Name, "error", err)
 	} else {
 		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
 		if err != nil {
-			log.Printf("Warning: failed to store signing key for agent %s: %v", req.Name, err)
+			logger.Warn("failed to store signing key", "agent", req.Name, "error", err)
 		}
 	}
 
@@ -581,7 +581,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// Revoke all active credentials from backends
 	creds, err := s.store.GetAllCredentialsByAgent(agent.ID)
 	if err != nil {
-		log.Printf("Warning: failed to get credentials for agent %s: %v", name, err)
+		logger.Warn("failed to get credentials for agent", "name", name, "error", err)
 	} else {
 		for _, cred := range creds {
 			if cred.ExternalID != "" {
@@ -592,7 +592,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Delete credentials from database
 	if err := s.store.DeleteAllCredentialsByAgent(agent.ID); err != nil {
-		log.Printf("Warning: failed to delete credentials for agent %s: %v", name, err)
+		logger.Warn("failed to delete credentials for agent", "name", name, "error", err)
 	}
 
 	// Delete the agent
@@ -601,7 +601,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Unenrolled agent %s (revoked %d credentials)", name, len(creds))
+	logger.Info("unenrolled agent", "name", name, "credentials_revoked", len(creds))
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -702,7 +702,7 @@ func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
 		pluginNames = append(pluginNames, p.Info.Name)
 	}
 
-	log.Printf("Plugin reload: %d new plugins loaded, %d total", len(loaded), len(pluginNames))
+	logger.Info("plugin reload", "new_plugins", len(loaded), "total", len(pluginNames))
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"loaded":  loaded,
@@ -735,7 +735,7 @@ func (s *Server) handlePluginReloadOne(w http.ResponseWriter, r *http.Request) {
 		s.backends.Register(pluginName, bridge)
 	}
 
-	log.Printf("Reloaded plugin: %s (version: %s)", loaded.Info.Name, loaded.Info.Version)
+	logger.Info("reloaded plugin", "name", loaded.Info.Name, "version", loaded.Info.Version)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"reloaded": pluginName,
@@ -950,7 +950,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	if s.policyEngine != nil {
 		result := s.policyEngine.Evaluate(req.Name, req.Scopes)
 		if result.AutoApprove {
-			log.Printf("Policy auto-approved enrollment: %s (policy: %s)", req.Name, result.PolicyName)
+			logger.Info("policy auto-approved enrollment", "name", req.Name, "policy", result.PolicyName)
 			
 			token := generateToken()
 			scopesJSON, _ := json.Marshal(req.Scopes)
@@ -979,13 +979,13 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 		// If policy matched but didn't auto-approve, log the reason
 		if result.PolicyName != "" {
-			log.Printf("Policy '%s' requires manual approval for %s: %s", result.PolicyName, req.Name, result.DenyReason)
+			logger.Debug("policy requires manual approval", "policy", result.PolicyName, "name", req.Name, "reason", result.DenyReason)
 		}
 	}
 
 	// Check for local admin token - auto-approve if valid
 	if req.AdminToken != "" && req.AdminToken == s.localAdminToken {
-		log.Printf("Local admin enrollment (auto-approved): %s", req.Name)
+		logger.Info("local admin enrollment auto-approved", "name", req.Name)
 		
 		// Create agent directly without pending state
 		token := generateToken()
@@ -1015,7 +1015,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("New enrollment request: %s (%s) scopes=%v", req.Name, enrollment.ID, req.Scopes)
+	logger.Info("new enrollment request", "name", req.Name, "id", enrollment.ID, "scopes", req.Scopes)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id":     enrollment.ID,
@@ -1063,7 +1063,7 @@ func (s *Server) handleScopeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Scope request from %s: %v", agent.Name, req.Scopes)
+	logger.Info("scope request", "agent", agent.Name, "scopes", req.Scopes)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id":     amendment.ID,
@@ -1196,7 +1196,7 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 		})
 		s.store.LogAuditEvent(agent.ID, agent.Name, "scopes_amended", "", string(details), "", r.RemoteAddr)
 
-		log.Printf("Approved scope amendment for %s: added %v", agent.Name, newScopes)
+		logger.Info("approved scope amendment", "agent", agent.Name, "added", newScopes)
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":       agent.ID,
@@ -1227,11 +1227,11 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	// Generate GPG signing key for the agent
 	keyPair, err := signing.GenerateKeyPair(enrollment.Name, s.domain)
 	if err != nil {
-		log.Printf("Warning: failed to generate signing key for agent %s: %v", enrollment.Name, err)
+		logger.Warn("failed to generate signing key", "agent", enrollment.Name, "error", err)
 	} else {
 		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
 		if err != nil {
-			log.Printf("Warning: failed to store signing key for agent %s: %v", enrollment.Name, err)
+			logger.Warn("failed to store signing key", "agent", enrollment.Name, "error", err)
 		}
 	}
 
@@ -1242,7 +1242,7 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_enrolled", "", string(details), "", r.RemoteAddr)
 
-	log.Printf("Approved enrollment: %s -> agent %s", enrollment.Name, agent.ID)
+	logger.Info("approved enrollment", "name", enrollment.Name, "agent_id", agent.ID)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id":       agent.ID,
@@ -1271,7 +1271,7 @@ func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Rejected enrollment: %s", enrollment.Name)
+	logger.Info("rejected enrollment", "name", enrollment.Name)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1521,14 +1521,13 @@ func (s *Server) reapExpiredPolicyAgents() {
 		case <-ticker.C:
 			agents, err := s.store.GetExpiredPolicyAgents()
 			if err != nil {
-				log.Printf("Error getting expired policy agents: %v", err)
+				logger.Error("error getting expired policy agents", "error", err)
 				continue
 			}
 			for _, agent := range agents {
-				log.Printf("Unenrolling expired policy agent: %s (policy: %s, expired: %v)", 
-					agent.Name, *agent.PolicyName, agent.ExpiresAt)
+                logger.Info("unenrolling expired policy agent", "name", agent.Name, "policy", *agent.PolicyName, "expires_at", agent.ExpiresAt)
 				if err := s.store.DeleteAgent(agent.ID); err != nil {
-					log.Printf("Error deleting expired agent %s: %v", agent.Name, err)
+					logger.Error("error deleting expired agent", "name", agent.Name, "error", err)
 				}
 			}
 		}

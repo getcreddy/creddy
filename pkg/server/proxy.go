@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"github.com/getcreddy/creddy/pkg/logger"
 	"net/http"
 	"strings"
 	"time"
@@ -69,7 +69,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Create request to plugin proxy
 	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, pluginProxyURL, r.Body)
 	if err != nil {
-		log.Printf("Failed to create proxy request: %v", err)
+		logger.Error("failed to create proxy request", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to create proxy request")
 		return
 	}
@@ -92,7 +92,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
-		log.Printf("Plugin proxy request failed for %s: %v", backendName, err)
+		logger.Error("plugin proxy request failed", "backend", backendName, "error", err)
 		writeError(w, http.StatusBadGateway, "plugin proxy unavailable")
 		return
 	}

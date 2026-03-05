@@ -89,6 +89,7 @@ func (l *Loader) LoadPlugin(name string) (*LoadedPlugin, error) {
 	}
 
 	// Find the plugin binary
+	l.logger.Debug("searching for plugin", "name", name)
 	binaryPath := l.findPluginBinary(name)
 	if binaryPath == "" {
 		return nil, fmt.Errorf("plugin not found: %s", name)
@@ -141,6 +142,7 @@ func (l *Loader) LoadPlugin(name string) (*LoadedPlugin, error) {
 		Plugin: p,
 	}
 
+	l.logger.Debug("plugin loaded successfully", "name", name, "version", info.Version)
 	l.plugins[name] = loaded
 	return loaded, nil
 }
