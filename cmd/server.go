@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/getcreddy/creddy/pkg/plugin"
-	"log"
 	"github.com/getcreddy/creddy/pkg/config"
+	"github.com/getcreddy/creddy/pkg/logger"
+	"github.com/getcreddy/creddy/pkg/plugin"
 	"github.com/getcreddy/creddy/pkg/policy"
 	"github.com/getcreddy/creddy/pkg/server"
 	"github.com/spf13/cobra"
@@ -69,17 +69,18 @@ var serverCmd = &cobra.Command{
 			pluginDirs = append(pluginDirs, filepath.Join(home, ".local", "share", "creddy", "plugins"))
 		}
 		
-		pluginLoader := plugin.LoadFromDirectories(pluginDirs, nil)
+		logger.Debug("searching for plugins", "dirs", pluginDirs)
+		pluginLoader := plugin.LoadFromDirectories(pluginDirs, logger.ForPlugin())
 
 		// Register plugin loader as the default
-		plugin.NewLoaderBridge(pluginLoader).Register()
 		plugin.NewLoaderBridge(pluginLoader).Register()
 
 		// Log loaded plugins
 		loadedPlugins := pluginLoader.ListPlugins()
 		if len(loadedPlugins) > 0 {
-			fmt.Printf("Loaded %d plugins:\n", len(loadedPlugins))
+			logger.Info("loaded plugins", "count", len(loadedPlugins))
 			for _, p := range loadedPlugins {
+				logger.Debug("plugin loaded", "name", p.Info.Name, "version", p.Info.Version)
 				fmt.Printf("  - %s v%s\n", p.Info.Name, p.Info.Version)
 			}
 		}
@@ -91,9 +92,10 @@ var serverCmd = &cobra.Command{
 		if configPath != "" {
 			cfg, err := config.Load(configPath)
 			if err != nil {
-				log.Printf("Warning: failed to load config: %v", err)
+				logger.Warn("failed to load config", "error", err)
 			} else if len(cfg.Policies) > 0 {
 				policyEngine = policy.NewEngine(cfg.Policies)
+				logger.Info("loaded auto-approval policies", "count", len(cfg.Policies))
 				fmt.Printf("Loaded %d auto-approval policies\n", len(cfg.Policies))
 			}
 		}
@@ -138,6 +140,7 @@ var serverCmd = &cobra.Command{
 		localAddr := "127.0.0.1:8400"
 		if listen != localAddr && !strings.HasPrefix(listen, "127.0.0.1:") {
 			go func() {
+				logger.Info("listening", "addr", localAddr, "type", "local admin")
 				fmt.Printf("Listening on %s (local admin)\n", localAddr)
 				errCh <- http.ListenAndServe(localAddr, handler)
 			}()
@@ -145,6 +148,7 @@ var serverCmd = &cobra.Command{
 
 		// Listen on configured address
 		go func() {
+			logger.Info("listening", "addr", listen)
 			fmt.Printf("Listening on %s\n", listen)
 			errCh <- http.ListenAndServe(listen, handler)
 		}()

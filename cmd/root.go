@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/getcreddy/creddy/pkg/logger"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
+var debug bool
 
 var rootCmd = &cobra.Command{
 	Version: Version,
@@ -20,6 +22,14 @@ time-limited credentials to AI agents without exposing master secrets.
 Agents authenticate to Creddy, and Creddy issues ephemeral tokens
 for services like GitHub, AWS, and more.`,
 	SilenceErrors: true,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Initialize logger based on --debug flag or CREDDY_DEBUG env var
+		debugMode := debug || os.Getenv("CREDDY_DEBUG") == "1"
+		logger.Init(debugMode)
+		if debugMode {
+			logger.Debug("debug logging enabled")
+		}
+	},
 }
 
 func Execute() {
@@ -32,6 +42,7 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/creddy/config.yaml)")
+	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
 }
 
 func initConfig() {
