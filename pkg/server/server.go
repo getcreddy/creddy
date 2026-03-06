@@ -92,6 +92,7 @@ func New(cfg Config) (*Server, error) {
 	// Start the reapers
 	go s.reapExpiredCredentials()
 	go s.reapExpiredPolicyAgents() // Always run - handles expires_in TTL
+	go s.reapStaleEnrollments()    // Clean up approved enrollments with plaintext secrets
 	if s.agentInactivityLimit > 0 {
 		go s.reapInactiveAgents()
 	}
@@ -1968,6 +1969,30 @@ func (s *Server) reapExpiredPolicyAgents() {
 				if err := s.store.DeleteAgent(agent.ID); err != nil {
 					logger.Error("error deleting expired agent", "name", agent.Name, "error", err)
 				}
+			}
+		}
+	}
+}
+
+// reapStaleEnrollments removes approved enrollments that haven't been picked up
+// This prevents plaintext OIDC secrets from persisting indefinitely
+func (s *Server) reapStaleEnrollments() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Clean up approved enrollments older than 1 hour
+			count, err := s.store.CleanupApprovedEnrollments(1 * time.Hour)
+			if err != nil {
+				logger.Error("error cleaning up stale enrollments", "error", err)
+				continue
+			}
+			if count > 0 {
+				logger.Info("cleaned up stale approved enrollments", "count", count)
 			}
 		}
 	}

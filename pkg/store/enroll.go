@@ -218,6 +218,20 @@ func (s *Store) DeletePendingEnrollment(id string) error {
 	return err
 }
 
+// CleanupApprovedEnrollments removes approved enrollments older than maxAge
+// This ensures plaintext OIDC secrets don't persist indefinitely if never picked up
+func (s *Store) CleanupApprovedEnrollments(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-maxAge)
+	result, err := s.db.Exec(
+		`DELETE FROM pending_enrollments WHERE status = 'approved' AND created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // CleanupOldEnrollments removes enrollments older than the given duration
 func (s *Store) CleanupOldEnrollments(maxAge time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-maxAge)
