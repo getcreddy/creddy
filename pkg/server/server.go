@@ -278,6 +278,66 @@ func (s *Server) OIDCProvider() *oidc.Provider {
 	return s.oidcProvider
 }
 
+// authenticateAdmin validates a request has admin privileges
+// Returns the agent if authorized, or writes an error and returns nil
+func (s *Server) authenticateAdmin(w http.ResponseWriter, r *http.Request, requiredScope string) *store.Agent {
+	token := extractBearerToken(r)
+	
+	// Allow unauthenticated access from localhost for backward compatibility
+	if token == "" {
+		if isLocalRequest(r) {
+			return &store.Agent{Name: "local-admin", ID: "local"}
+		}
+		writeError(w, http.StatusUnauthorized, "admin authentication required")
+		return nil
+	}
+
+	agent, err := s.authenticateAgent(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
+		return nil
+	}
+
+	// Check for admin scope
+	if !agentHasScope(agent, requiredScope) {
+		writeError(w, http.StatusForbidden, "insufficient permissions: requires "+requiredScope)
+		return nil
+	}
+
+	return agent
+}
+
+// agentHasScope checks if an agent has a specific scope
+func agentHasScope(agent *store.Agent, required string) bool {
+	var scopes []string
+	json.Unmarshal([]byte(agent.Scopes), &scopes)
+
+	for _, scope := range scopes {
+		// Exact match
+		if scope == required {
+			return true
+		}
+		// Wildcard match: admin:* matches admin:agents:read
+		if strings.HasSuffix(scope, ":*") {
+			prefix := strings.TrimSuffix(scope, "*")
+			if strings.HasPrefix(required, prefix) {
+				return true
+			}
+		}
+		// Full wildcard
+		if scope == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalRequest checks if the request is from localhost
+func isLocalRequest(r *http.Request) bool {
+	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
 // authenticateAgent validates a bearer token and returns the agent
 // Supports both OIDC JWTs (eyJ...) and legacy ckr_ tokens
 func (s *Server) authenticateAgent(token string) (*store.Agent, error) {
@@ -678,6 +738,10 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 // Admin endpoints
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:read"); admin == nil {
+		return
+	}
+
 	agents, err := s.store.ListAgents()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agents")
@@ -699,6 +763,10 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:write"); admin == nil {
+		return
+	}
+
 	var req struct {
 		Name   string   `json:"name"`
 		Scopes []string `json:"scopes"`
@@ -775,6 +843,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:write"); admin == nil {
+		return
+	}
+
 	name := r.PathValue("name")
 
 	// Get agent to find their credentials
@@ -813,6 +885,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:read"); admin == nil {
+		return
+	}
+
 	backends, err := s.store.ListBackends()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list backends")
@@ -833,6 +909,10 @@ func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateBackend(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:write"); admin == nil {
+		return
+	}
+
 	var req struct {
 		Type   string          `json:"type"`
 		Name   string          `json:"name"`
@@ -877,6 +957,10 @@ func (s *Server) handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:write"); admin == nil {
+		return
+	}
+
 	name := r.PathValue("name")
 
 	if err := s.store.DeleteBackend(name); err != nil {
@@ -890,6 +974,10 @@ func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:plugins:write"); admin == nil {
+		return
+	}
+
 	if s.pluginLoader == nil {
 		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
 		return
@@ -917,6 +1005,10 @@ func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginReloadOne(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:plugins:write"); admin == nil {
+		return
+	}
+
 	if s.pluginLoader == nil {
 		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
 		return
@@ -1002,6 +1094,10 @@ func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:audit:read"); admin == nil {
+		return
+	}
+
 	// Parse query params
 	limitStr := r.URL.Query().Get("limit")
 	limit := 100
@@ -1037,6 +1133,10 @@ func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:keys:read"); admin == nil {
+		return
+	}
+
 	keys, err := s.store.ListPublicKeys()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list keys")
@@ -1320,6 +1420,10 @@ func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:read"); admin == nil {
+		return
+	}
+
 	enrollments, err := s.store.ListPendingEnrollments()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list pending enrollments")
@@ -1345,6 +1449,10 @@ func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	// Get the enrollment
@@ -1469,6 +1577,10 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	enrollment, err := s.store.GetPendingEnrollment(id)
@@ -1652,6 +1764,10 @@ func agentCanAccessBackend(agent *store.Agent, backendName string, repos []strin
 
 // handleListAllTokens lists all active tokens (admin)
 func (s *Server) handleListAllTokens(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:tokens:read"); admin == nil {
+		return
+	}
+
 	backend := r.URL.Query().Get("backend")
 	agentName := r.URL.Query().Get("agent")
 
@@ -1704,6 +1820,10 @@ func (s *Server) handleListAllTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminRevokeToken revokes a token by ID (admin)
 func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:tokens:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	cred, err := s.store.GetActiveCredential(id)
