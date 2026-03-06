@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/getcreddy/creddy/pkg/logger"
-	"github.com/getcreddy/creddy/pkg/oidc"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,10 +14,13 @@ import (
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/backend"
+	"github.com/getcreddy/creddy/pkg/logger"
+	"github.com/getcreddy/creddy/pkg/oidc"
 	pluginpkg "github.com/getcreddy/creddy/pkg/plugin"
+	"github.com/getcreddy/creddy/pkg/policy"
 	"github.com/getcreddy/creddy/pkg/signing"
 	"github.com/getcreddy/creddy/pkg/store"
-	"github.com/getcreddy/creddy/pkg/policy"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type Server struct {
@@ -277,6 +278,80 @@ func (s *Server) OIDCProvider() *oidc.Provider {
 	return s.oidcProvider
 }
 
+// authenticateAgent validates a bearer token and returns the agent
+// Supports both OIDC JWTs (eyJ...) and legacy ckr_ tokens
+func (s *Server) authenticateAgent(token string) (*store.Agent, error) {
+	// Check if it looks like a JWT (starts with eyJ)
+	if strings.HasPrefix(token, "eyJ") && s.oidcProvider != nil {
+		// Parse and validate JWT
+		claims, err := s.validateOIDCToken(token)
+		if err != nil {
+			return nil, fmt.Errorf("invalid JWT: %w", err)
+		}
+
+		// Look up agent by ID from claims
+		agent, err := s.store.GetAgentByID(claims.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("agent not found")
+		}
+
+		// Update last used
+		s.store.UpdateAgentLastUsed(agent.ID)
+		return agent, nil
+	}
+
+	// Legacy token authentication
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	s.store.UpdateAgentLastUsed(agent.ID)
+	return agent, nil
+}
+
+// validateOIDCToken validates an OIDC access token and returns its claims
+func (s *Server) validateOIDCToken(tokenStr string) (*oidc.AgentClaims, error) {
+	if s.oidcProvider == nil {
+		return nil, fmt.Errorf("OIDC not configured")
+	}
+
+	km := s.oidcProvider.KeyManager()
+
+	token, err := jwt.ParseWithClaims(tokenStr, &oidc.AgentClaims{}, func(token *jwt.Token) (interface{}, error) {
+		// Verify signing method
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, fmt.Errorf("missing kid header")
+		}
+
+		key, err := km.GetKey(kid)
+		if err != nil {
+			return nil, err
+		}
+		return &key.PrivateKey.PublicKey, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("token not valid")
+	}
+
+	claims, ok := token.Claims.(*oidc.AgentClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid claims type")
+	}
+
+	return claims, nil
+}
+
 // newOIDCKeyStore creates a KeyStore adapter backed by the database
 func (s *Server) newOIDCKeyStore() oidc.KeyStore {
 	return oidc.NewKeyStoreAdapter(
@@ -424,10 +499,10 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate agent token
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	// Validate agent - supports both OIDC JWTs and legacy ckr_ tokens
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization: "+err.Error())
 		return
 	}
 
@@ -540,9 +615,9 @@ func (s *Server) handleListActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -574,9 +649,9 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -881,9 +956,9 @@ func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -992,9 +1067,9 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -1162,9 +1237,9 @@ func (s *Server) handleScopeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
