@@ -147,10 +147,44 @@ var agentListCmd = &cobra.Command{
 	},
 }
 
+var agentDeleteCmd = &cobra.Command{
+	Use:     "delete [name]",
+	Aliases: []string{"remove", "rm"},
+	Short:   "Delete an agent",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+
+		serverURL := viper.GetString("admin.url")
+		if serverURL == "" {
+			serverURL = "http://127.0.0.1:8400"
+		}
+
+		req, _ := http.NewRequest("DELETE", serverURL+"/v1/admin/agents/"+name, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to connect to server: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("agent not found: %s", name)
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+		}
+
+		fmt.Printf("Agent deleted: %s\n", name)
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(agentCmd)
 	agentCmd.AddCommand(agentCreateCmd)
 	agentCmd.AddCommand(agentListCmd)
+	agentCmd.AddCommand(agentDeleteCmd)
 
 	agentCreateCmd.Flags().StringSlice("can", []string{}, "Scopes this agent can request (e.g., github:read,write)")
 }
