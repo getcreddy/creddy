@@ -807,6 +807,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		agent, err = s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
 	}
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			writeError(w, http.StatusConflict, "agent already exists: "+req.Name)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
 		return
 	}
