@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/getcreddy/creddy/pkg/logger"
+	"github.com/getcreddy/creddy/pkg/oidc"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type Server struct {
 	agentInactivityLimit time.Duration
 	localAdminToken      string
 	policyEngine         *policy.Engine
+	oidcProvider         *oidc.Provider
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
@@ -40,6 +42,7 @@ type Config struct {
 	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
 	PluginLoader         *pluginpkg.Loader // Plugin loader for hot-reload support
 	PolicyEngine         *policy.Engine
+	OIDCIssuer           string         // OIDC issuer URL (e.g., https://creddy.example.com)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -86,7 +89,23 @@ func New(cfg Config) (*Server, error) {
 	go s.reapExpiredCredentials()
 	if s.agentInactivityLimit > 0 {
 		go s.reapInactiveAgents()
-	go s.reapExpiredPolicyAgents()
+		go s.reapExpiredPolicyAgents()
+	}
+
+	// Initialize OIDC provider if issuer is configured
+	if cfg.OIDCIssuer != "" {
+		oidcProvider, err := oidc.NewProvider(oidc.Config{
+			Issuer:        cfg.OIDCIssuer,
+			DefaultTTL:    1 * time.Hour,
+			MaxTTL:        24 * time.Hour,
+			TokenProvider: s.newOIDCTokenProvider(),
+		})
+		if err != nil {
+			logger.Warn("failed to initialize OIDC provider", "error", err)
+		} else {
+			s.oidcProvider = oidcProvider
+			logger.Info("OIDC provider initialized", "issuer", cfg.OIDCIssuer)
+		}
 	}
 
 	return s, nil
@@ -211,6 +230,33 @@ func (s *Server) Backends() *backend.Manager {
 	return s.backends
 }
 
+// newOIDCTokenProvider creates a TokenProvider that validates agents using the store
+func (s *Server) newOIDCTokenProvider() oidc.TokenProvider {
+	return oidc.NewStoreAdapter(func(clientID, clientSecret string) (*oidc.AgentInfo, error) {
+		// For OIDC, we use agent name as client_id and token as client_secret
+		agent, err := s.store.GetAgentByTokenHash(hashToken(clientSecret))
+		if err != nil {
+			return nil, fmt.Errorf("invalid credentials")
+		}
+
+		// Verify the client_id matches the agent name or ID
+		if agent.Name != clientID && agent.ID != clientID {
+			return nil, fmt.Errorf("invalid credentials")
+		}
+
+		return &oidc.AgentInfo{
+			ID:     agent.ID,
+			Name:   agent.Name,
+			Scopes: oidc.ParseScopes(agent.Scopes),
+		}, nil
+	})
+}
+
+// OIDCProvider returns the OIDC provider (for key management, etc.)
+func (s *Server) OIDCProvider() *oidc.Provider {
+	return s.oidcProvider
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -257,6 +303,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Proxy endpoints (for backends that support proxy mode)
 	s.RegisterProxyRoutes(mux)
+
+	// OIDC endpoints (if enabled)
+	if s.oidcProvider != nil {
+		s.oidcProvider.RegisterRoutes(mux)
+	}
 
 	// Auth relay endpoints (for @creddy/auth CLI)
 
