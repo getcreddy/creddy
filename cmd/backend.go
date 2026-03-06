@@ -75,7 +75,12 @@ var backendListCmd = &cobra.Command{
 			serverURL = "http://127.0.0.1:8400"
 		}
 
-		resp, err := http.Get(serverURL + "/v1/admin/backends")
+		req, err := http.NewRequest("GET", serverURL+"/v1/admin/backends", nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		addAdminToken(req)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
 		}
@@ -115,6 +120,7 @@ var backendRemoveCmd = &cobra.Command{
 		}
 
 		req, _ := http.NewRequest("DELETE", serverURL+"/v1/admin/backends/"+name, nil)
+		addAdminToken(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
@@ -570,7 +576,13 @@ func submitBackend(pluginType, name string, config map[string]interface{}) error
 		"config": json.RawMessage(configJSON),
 	})
 
-	resp, err := http.Post(serverURL+"/v1/admin/backends", "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequest("POST", serverURL+"/v1/admin/backends", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addAdminToken(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
