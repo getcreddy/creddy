@@ -833,15 +833,17 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Generate OIDC client credentials
+	// Generate OIDC client credentials (only if OIDC is enabled)
 	var oidcCreds *oidc.ClientCredentials
-	oidcCreds, err = oidc.GenerateClientCredentials()
-	if err != nil {
-		logger.Warn("failed to generate OIDC credentials", "agent", req.Name, "error", err)
-	} else {
-		if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
-			logger.Warn("failed to store OIDC credentials", "agent", req.Name, "error", err)
-			oidcCreds = nil
+	if s.oidcProvider != nil {
+		oidcCreds, err = oidc.GenerateClientCredentials()
+		if err != nil {
+			logger.Warn("failed to generate OIDC credentials", "agent", req.Name, "error", err)
+		} else {
+			if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+				logger.Warn("failed to store OIDC credentials", "agent", req.Name, "error", err)
+				oidcCreds = nil
+			}
 		}
 	}
 
@@ -1487,23 +1489,25 @@ func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
 		"status": enrollment.Status,
 	}
 
-	// If approved, return the token (only works once - client should save it)
+	// If approved, return the credentials (only works once - client should save them)
 	if enrollment.Status == "approved" && enrollment.Token != "" {
-		// Get the agent that was created
-		agent, err := s.store.GetAgentByTokenHash(enrollment.Token)
-		if err == nil {
-			// Generate the actual token to return (we stored the hash)
-			// Actually, we need to store the token temporarily for pickup
-			// Let's return it from a separate field we'll add
-		}
-		_ = agent // TODO: include agent info
-
-		// For now, the token was stored as hash - we need to change approach
-		// Store the actual token encrypted or in a pickup field
 		response["token"] = enrollment.Token
 		response["scopes"] = enrollment.Scopes
 
-		// Delete the enrollment after token pickup
+		// Include OIDC credentials if available
+		if enrollment.OIDCClientID != nil && enrollment.OIDCClientSecret != nil {
+			response["oidc"] = map[string]string{
+				"client_id":     *enrollment.OIDCClientID,
+				"client_secret": *enrollment.OIDCClientSecret,
+			}
+		}
+
+		// Include server URL if configured
+		if s.publicURL != "" {
+			response["server_url"] = s.publicURL
+		}
+
+		// Delete the enrollment after credential pickup
 		s.store.DeletePendingEnrollment(enrollment.ID)
 	}
 
@@ -1640,18 +1644,26 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Generate OIDC client credentials
-	oidcCreds, err := oidc.GenerateClientCredentials()
-	if err != nil {
-		logger.Warn("failed to generate OIDC credentials", "agent", enrollment.Name, "error", err)
-	} else {
-		if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
-			logger.Warn("failed to store OIDC credentials", "agent", enrollment.Name, "error", err)
+	// Generate OIDC client credentials (only if OIDC is enabled)
+	var oidcCreds *oidc.ClientCredentials
+	if s.oidcProvider != nil {
+		oidcCreds, err = oidc.GenerateClientCredentials()
+		if err != nil {
+			logger.Warn("failed to generate OIDC credentials", "agent", enrollment.Name, "error", err)
+		} else {
+			if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+				logger.Warn("failed to store OIDC credentials", "agent", enrollment.Name, "error", err)
+				oidcCreds = nil
+			}
 		}
 	}
 
 	// Update enrollment with the token (not hashed - client needs to pick it up)
-	s.store.ApproveAgentEnrollment(id, token, scopesJSON)
+	if oidcCreds != nil {
+		s.store.ApproveAgentEnrollmentWithOIDC(id, token, scopesJSON, oidcCreds.ClientID, oidcCreds.ClientSecret)
+	} else {
+		s.store.ApproveAgentEnrollment(id, token, scopesJSON)
+	}
 
 	// Audit log
 	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})

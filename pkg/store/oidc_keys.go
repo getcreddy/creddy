@@ -37,19 +37,29 @@ func (s *Store) migrateOIDCKeys() error {
 func (s *Store) CreateOIDCKey(keyID, privateKeyPEM string, isCurrent bool) (*OIDCKey, error) {
 	id := generateID()
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	// If this is the current key, unset any existing current key
 	if isCurrent {
-		_, err := s.db.Exec(`UPDATE oidc_keys SET is_current = FALSE WHERE is_current = TRUE`)
+		_, err := tx.Exec(`UPDATE oidc_keys SET is_current = FALSE WHERE is_current = TRUE`)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	_, err := s.db.Exec(
+	_, err = tx.Exec(
 		`INSERT INTO oidc_keys (id, key_id, private_key, is_current) VALUES (?, ?, ?, ?)`,
 		id, keyID, privateKeyPEM, isCurrent,
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
