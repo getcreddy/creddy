@@ -55,6 +55,13 @@ var agentCreateCmd = &cobra.Command{
 			Token     string    `json:"token"`
 			Scopes    []string  `json:"scopes"`
 			CreatedAt time.Time `json:"created_at"`
+			ExpiresAt *time.Time `json:"expires_at,omitempty"`
+			OIDC      *struct {
+				ClientID     string `json:"client_id"`
+				ClientSecret string `json:"client_secret"`
+			} `json:"oidc,omitempty"`
+			SigningKeyID string `json:"signing_key_id,omitempty"`
+			SigningEmail string `json:"signing_email,omitempty"`
 		}
 		json.Unmarshal(body, &result)
 
@@ -63,11 +70,37 @@ var agentCreateCmd = &cobra.Command{
 		if len(result.Scopes) > 0 {
 			fmt.Printf("Scopes: %v\n", result.Scopes)
 		}
-		fmt.Printf("\n⚠️  Agent token (save this, it won't be shown again):\n")
+		if result.ExpiresAt != nil {
+			fmt.Printf("Expires: %s\n", result.ExpiresAt.Format(time.RFC3339))
+		}
+
+		fmt.Printf("\n⚠️  Credentials (save these, they won't be shown again):\n\n")
+
+		fmt.Printf("Vend Token:\n")
 		fmt.Printf("  %s\n", result.Token)
+
+		if result.OIDC != nil {
+			fmt.Printf("\nOIDC Credentials:\n")
+			fmt.Printf("  Client ID:     %s\n", result.OIDC.ClientID)
+			fmt.Printf("  Client Secret: %s\n", result.OIDC.ClientSecret)
+		}
+
+		if result.SigningKeyID != "" {
+			fmt.Printf("\nGit Signing:\n")
+			fmt.Printf("  Key ID: %s\n", result.SigningKeyID)
+			fmt.Printf("  Email:  %s\n", result.SigningEmail)
+		}
+
 		fmt.Printf("\nSet on agent machines:\n")
 		fmt.Printf("  export CREDDY_URL=%s\n", serverURL)
 		fmt.Printf("  export CREDDY_TOKEN=%s\n", result.Token)
+
+		if result.OIDC != nil {
+			fmt.Printf("\nOr use OIDC:\n")
+			fmt.Printf("  export CREDDY_URL=%s\n", serverURL)
+			fmt.Printf("  export CREDDY_CLIENT_ID=%s\n", result.OIDC.ClientID)
+			fmt.Printf("  export CREDDY_CLIENT_SECRET=%s\n", result.OIDC.ClientSecret)
+		}
 
 		return nil
 	},
