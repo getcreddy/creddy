@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -22,6 +23,7 @@ type SigningKey struct {
 
 // KeyManager handles OIDC signing key lifecycle
 type KeyManager struct {
+	mu         sync.RWMutex
 	keys       map[string]*SigningKey
 	currentKey string // ID of the active signing key
 }
@@ -46,14 +48,19 @@ func (km *KeyManager) GenerateKey() (*SigningKey, error) {
 		CreatedAt:  time.Now(),
 	}
 
+	km.mu.Lock()
 	km.keys[key.ID] = key
 	km.currentKey = key.ID
+	km.mu.Unlock()
 
 	return key, nil
 }
 
 // CurrentKey returns the active signing key
 func (km *KeyManager) CurrentKey() (*SigningKey, error) {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+
 	if km.currentKey == "" {
 		return nil, fmt.Errorf("no signing key available")
 	}
@@ -66,6 +73,9 @@ func (km *KeyManager) CurrentKey() (*SigningKey, error) {
 
 // GetKey returns a key by ID (for verification)
 func (km *KeyManager) GetKey(kid string) (*SigningKey, error) {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+
 	key, ok := km.keys[kid]
 	if !ok {
 		return nil, fmt.Errorf("key not found: %s", kid)
@@ -75,6 +85,9 @@ func (km *KeyManager) GetKey(kid string) (*SigningKey, error) {
 
 // AllKeys returns all active keys (for JWKS)
 func (km *KeyManager) AllKeys() []*SigningKey {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+
 	keys := make([]*SigningKey, 0, len(km.keys))
 	for _, k := range km.keys {
 		keys = append(keys, k)
@@ -84,6 +97,9 @@ func (km *KeyManager) AllKeys() []*SigningKey {
 
 // JWKS returns a JSON Web Key Set for all public keys
 func (km *KeyManager) JWKS() jose.JSONWebKeySet {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+
 	var keys []jose.JSONWebKey
 	for _, k := range km.keys {
 		jwk := jose.JSONWebKey{
@@ -150,16 +166,21 @@ func (km *KeyManager) ImportPrivateKeyPEM(kid string, pemData string, createdAt 
 		CreatedAt:  createdAt,
 	}
 
+	km.mu.Lock()
 	km.keys[kid] = key
 	if km.currentKey == "" {
 		km.currentKey = kid
 	}
+	km.mu.Unlock()
 
 	return nil
 }
 
 // SetCurrentKey sets the active signing key
 func (km *KeyManager) SetCurrentKey(kid string) error {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+
 	if _, ok := km.keys[kid]; !ok {
 		return fmt.Errorf("key not found: %s", kid)
 	}

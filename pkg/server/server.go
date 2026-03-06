@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,9 +91,9 @@ func New(cfg Config) (*Server, error) {
 
 	// Start the reapers
 	go s.reapExpiredCredentials()
+	go s.reapExpiredPolicyAgents() // Always run - handles expires_in TTL
 	if s.agentInactivityLimit > 0 {
 		go s.reapInactiveAgents()
-		go s.reapExpiredPolicyAgents()
 	}
 
 	// Initialize OIDC provider if issuer is configured
@@ -336,7 +337,11 @@ func agentHasScope(agent *store.Agent, required string) bool {
 
 // isLocalRequest checks if the request is from localhost
 func isLocalRequest(r *http.Request) bool {
-	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// No port, use as-is
+		host = r.RemoteAddr
+	}
 	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 

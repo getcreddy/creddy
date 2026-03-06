@@ -147,10 +147,21 @@ func (te *TokenEndpoint) parseRequest(r *http.Request) (*TokenRequest, error) {
 	}
 
 	// Parse body (form-encoded or JSON)
+	// Save Basic auth values - they take precedence per OAuth2 spec
+	basicClientID := req.ClientID
+	basicClientSecret := req.ClientSecret
+
 	contentType := r.Header.Get("Content-Type")
 	if strings.Contains(contentType, "application/json") {
 		if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 			return nil, fmt.Errorf("invalid JSON body: %w", err)
+		}
+		// Restore Basic auth values if they were set (takes precedence)
+		if basicClientID != "" {
+			req.ClientID = basicClientID
+		}
+		if basicClientSecret != "" {
+			req.ClientSecret = basicClientSecret
 		}
 	} else {
 		// Form-encoded (default per OAuth2 spec)
