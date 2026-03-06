@@ -12,6 +12,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// ensure strings is used (already imported for HasPrefix)
+var _ = strings.HasPrefix
+
 // mockTokenProvider implements TokenProvider for testing
 type mockTokenProvider struct {
 	agents map[string]*AgentInfo // clientID -> agent
@@ -244,6 +247,46 @@ func TestAgentClaims(t *testing.T) {
 		claims.WithTask("task-456", "Running tests")
 		if claims.TaskID != "task-456" {
 			t.Errorf("expected task_id task-456, got %s", claims.TaskID)
+		}
+	})
+}
+
+func TestClientCredentials(t *testing.T) {
+	t.Run("generate credentials", func(t *testing.T) {
+		creds, err := GenerateClientCredentials()
+		if err != nil {
+			t.Fatalf("failed to generate credentials: %v", err)
+		}
+
+		if !strings.HasPrefix(creds.ClientID, "agent_") {
+			t.Errorf("client_id should start with 'agent_', got %s", creds.ClientID)
+		}
+		if !strings.HasPrefix(creds.ClientSecret, "cks_") {
+			t.Errorf("client_secret should start with 'cks_', got %s", creds.ClientSecret)
+		}
+		if creds.SecretHash == "" {
+			t.Error("secret hash should not be empty")
+		}
+	})
+
+	t.Run("validate secret", func(t *testing.T) {
+		creds, _ := GenerateClientCredentials()
+
+		if !ValidateClientSecret(creds.ClientSecret, creds.SecretHash) {
+			t.Error("should validate correct secret")
+		}
+		if ValidateClientSecret("wrong_secret", creds.SecretHash) {
+			t.Error("should reject incorrect secret")
+		}
+	})
+
+	t.Run("hash consistency", func(t *testing.T) {
+		secret := "cks_test123"
+		hash1 := HashClientSecret(secret)
+		hash2 := HashClientSecret(secret)
+
+		if hash1 != hash2 {
+			t.Error("hash should be consistent")
 		}
 	})
 }

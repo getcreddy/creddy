@@ -234,16 +234,35 @@ func (s *Server) Backends() *backend.Manager {
 // newOIDCTokenProvider creates a TokenProvider that validates agents using the store
 func (s *Server) newOIDCTokenProvider() oidc.TokenProvider {
 	return oidc.NewStoreAdapter(func(clientID, clientSecret string) (*oidc.AgentInfo, error) {
-		// For OIDC, we use agent name as client_id and token as client_secret
-		agent, err := s.store.GetAgentByTokenHash(hashToken(clientSecret))
-		if err != nil {
-			return nil, fmt.Errorf("invalid credentials")
+		var agent *store.Agent
+		var err error
+
+		// Try OIDC client_id first (agent_xxx format)
+		if strings.HasPrefix(clientID, "agent_") {
+			agent, err = s.store.GetAgentByClientID(clientID)
+			if err == nil && agent.ClientSecretHash != nil {
+				// Validate client_secret
+				if !oidc.ValidateClientSecret(clientSecret, *agent.ClientSecretHash) {
+					return nil, fmt.Errorf("invalid credentials")
+				}
+			} else {
+				return nil, fmt.Errorf("invalid credentials")
+			}
+		} else {
+			// Legacy mode: use agent name as client_id and ckr_ token as client_secret
+			agent, err = s.store.GetAgentByTokenHash(hashToken(clientSecret))
+			if err != nil {
+				return nil, fmt.Errorf("invalid credentials")
+			}
+
+			// Verify the client_id matches the agent name or ID
+			if agent.Name != clientID && agent.ID != clientID {
+				return nil, fmt.Errorf("invalid credentials")
+			}
 		}
 
-		// Verify the client_id matches the agent name or ID
-		if agent.Name != clientID && agent.ID != clientID {
-			return nil, fmt.Errorf("invalid credentials")
-		}
+		// Update last used
+		s.store.UpdateAgentLastUsed(agent.ID)
 
 		return &oidc.AgentInfo{
 			ID:     agent.ID,
@@ -640,6 +659,18 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Generate OIDC client credentials
+	var oidcCreds *oidc.ClientCredentials
+	oidcCreds, err = oidc.GenerateClientCredentials()
+	if err != nil {
+		logger.Warn("failed to generate OIDC credentials", "agent", req.Name, "error", err)
+	} else {
+		if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+			logger.Warn("failed to store OIDC credentials", "agent", req.Name, "error", err)
+			oidcCreds = nil
+		}
+	}
+
 	// Audit log
 	details, _ := json.Marshal(map[string]interface{}{"scopes": req.Scopes})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_created", "", string(details), "", r.RemoteAddr)
@@ -655,6 +686,14 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if keyPair != nil {
 		response["signing_key_id"] = keyPair.KeyID
 		response["signing_email"] = keyPair.Email
+	}
+
+	// Include OIDC credentials (only shown once!)
+	if oidcCreds != nil {
+		response["oidc"] = map[string]string{
+			"client_id":     oidcCreds.ClientID,
+			"client_secret": oidcCreds.ClientSecret,
+		}
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -1324,6 +1363,16 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 		_, err = s.store.CreateSigningKey(agent.ID, keyPair.KeyID, keyPair.PublicKey, keyPair.PrivateKey, keyPair.Email, keyPair.Name)
 		if err != nil {
 			logger.Warn("failed to store signing key", "agent", enrollment.Name, "error", err)
+		}
+	}
+
+	// Generate OIDC client credentials
+	oidcCreds, err := oidc.GenerateClientCredentials()
+	if err != nil {
+		logger.Warn("failed to generate OIDC credentials", "agent", enrollment.Name, "error", err)
+	} else {
+		if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+			logger.Warn("failed to store OIDC credentials", "agent", enrollment.Name, "error", err)
 		}
 	}
 
