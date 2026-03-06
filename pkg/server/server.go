@@ -475,6 +475,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/active", s.handleListActive)
 	mux.HandleFunc("DELETE /v1/active/{id}", s.handleRevokeCredential)
 	mux.HandleFunc("GET /v1/signing-key", s.handleGetSigningKey)
+	mux.HandleFunc("DELETE /v1/self", s.handleSelfDelete)
 
 	// Admin endpoints (no auth for now - bind to localhost/tailnet only)
 	mux.HandleFunc("GET /v1/admin/agents", s.handleListAgents)
@@ -768,8 +769,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name   string   `json:"name"`
-		Scopes []string `json:"scopes"`
+		Name      string   `json:"name"`
+		Scopes    []string `json:"scopes"`
+		ExpiresIn string   `json:"expires_in,omitempty"` // e.g., "4h", "24h"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -781,11 +783,29 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse TTL if provided
+	var expiresAt *time.Time
+	if req.ExpiresIn != "" {
+		ttl, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid expires_in: "+err.Error())
+			return
+		}
+		t := time.Now().Add(ttl)
+		expiresAt = &t
+	}
+
 	// Generate token
 	token := generateToken()
 	scopesJSON, _ := json.Marshal(req.Scopes)
 
-	agent, err := s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
+	var agent *store.Agent
+	var err error
+	if expiresAt != nil {
+		agent, err = s.store.CreateAgentWithPolicy(req.Name, hashToken(token), string(scopesJSON), "", expiresAt)
+	} else {
+		agent, err = s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
 		return
@@ -824,6 +844,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		"token":      token, // Only shown once!
 		"scopes":     req.Scopes,
 		"created_at": agent.CreatedAt,
+	}
+
+	if expiresAt != nil {
+		response["expires_at"] = expiresAt
 	}
 
 	if keyPair != nil {
@@ -1091,6 +1115,58 @@ func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
 			"name":        key.Name,
 		})
 	}
+}
+
+// handleSelfDelete allows an agent to delete itself
+func (s *Server) handleSelfDelete(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.authenticateAgent(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
+		return
+	}
+
+	// Revoke all active credentials from backends
+	creds, err := s.store.GetAllCredentialsByAgent(agent.ID)
+	if err != nil {
+		logger.Warn("failed to get credentials for agent", "name", agent.Name, "error", err)
+	} else {
+		for _, cred := range creds {
+			if cred.ExternalID != "" {
+				if b, err := s.backends.Get(cred.Backend); err == nil {
+					if rb, ok := b.(backend.RevocableBackend); ok {
+						if err := rb.RevokeToken(cred.ExternalID); err != nil {
+							logger.Warn("failed to revoke token", "backend", cred.Backend, "error", err)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Delete all active credentials
+	s.store.DeleteActiveCredentialsByAgent(agent.ID)
+
+	// Delete signing key
+	s.store.DeleteSigningKey(agent.ID)
+
+	// Delete the agent
+	if err := s.store.DeleteAgent(agent.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete agent")
+		return
+	}
+
+	// Audit log (before deletion completes)
+	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_self_deleted", "", "", "", r.RemoteAddr)
+
+	logger.Info("agent self-deleted", "name", agent.Name, "id", agent.ID)
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {

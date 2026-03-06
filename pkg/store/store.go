@@ -408,6 +408,11 @@ func (s *Store) DeleteActiveCredential(id string) error {
 	return err
 }
 
+func (s *Store) DeleteActiveCredentialsByAgent(agentID string) error {
+	_, err := s.db.Exec(`DELETE FROM active_credentials WHERE agent_id = ?`, agentID)
+	return err
+}
+
 // GetExpiredCredentials returns credentials that have expired (for revocation)
 func (s *Store) GetExpiredCredentials() ([]*ActiveCredential, error) {
 	rows, err := s.db.Query(
@@ -477,10 +482,10 @@ func (s *Store) DeleteAllCredentialsByAgent(agentID string) error {
 	return err
 }
 
-// GetExpiredPolicyAgents returns agents whose policy-based expires_at has passed
+// GetExpiredPolicyAgents returns agents whose expires_at has passed
 func (s *Store) GetExpiredPolicyAgents() ([]*Agent, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at 
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash 
 		 FROM agents 
 		 WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`,
 	)
@@ -492,7 +497,7 @@ func (s *Store) GetExpiredPolicyAgents() ([]*Agent, error) {
 	var agents []*Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash); err != nil {
 			return nil, err
 		}
 		agents = append(agents, &a)
