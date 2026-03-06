@@ -175,3 +175,13 @@ func (km *KeyManager) RemoveKey(kid string) error {
 	delete(km.keys, kid)
 	return nil
 }
+
+// HasKeys returns true if any keys are loaded
+func (km *KeyManager) HasKeys() bool {
+	return len(km.keys) > 0
+}
+
+// CurrentKeyID returns the current key ID
+func (km *KeyManager) CurrentKeyID() string {
+	return km.currentKey
+}

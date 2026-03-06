@@ -104,6 +104,9 @@ var serverCmd = &cobra.Command{
 		server.ServerVersion = Version
 		server.ServerCommit = Commit
 
+		// OIDC configuration
+		oidcIssuer := viper.GetString("oidc.issuer")
+
 		srv, err := server.New(server.Config{
 			DBPath:               dbPath,
 			DataDir:              filepath.Dir(dbPath), // Directory containing the database
@@ -111,6 +114,7 @@ var serverCmd = &cobra.Command{
 			AgentInactivityLimit: agentInactivityLimit,
 			PluginLoader:         pluginLoader,
 			PolicyEngine:         policyEngine,
+			OIDCIssuer:           oidcIssuer,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to start server: %w", err)
@@ -131,6 +135,11 @@ var serverCmd = &cobra.Command{
 		fmt.Printf("Database: %s\n", dbPath)
 		if agentInactivityLimit > 0 {
 			fmt.Printf("Agent inactivity limit: %v\n", agentInactivityLimit)
+		}
+		if oidcIssuer != "" {
+			fmt.Printf("OIDC Issuer: %s\n", oidcIssuer)
+			fmt.Printf("  Discovery: %s/.well-known/openid-configuration\n", oidcIssuer)
+			fmt.Printf("  JWKS: %s/.well-known/jwks.json\n", oidcIssuer)
 		}
 
 		handler := srv.Handler()
@@ -164,8 +173,10 @@ func init() {
 	serverCmd.Flags().String("db", "", "Database path")
 	serverCmd.Flags().String("domain", "creddy.local", "Domain for agent email addresses")
 	serverCmd.Flags().Int("agent-inactivity-days", 0, "Auto-unenroll agents inactive for this many days (0 = disabled)")
+	serverCmd.Flags().String("oidc-issuer", "", "OIDC issuer URL (enables OIDC provider, e.g., https://creddy.example.com)")
 	viper.BindPFlag("server.listen", serverCmd.Flags().Lookup("listen"))
 	viper.BindPFlag("database.path", serverCmd.Flags().Lookup("db"))
 	viper.BindPFlag("server.domain", serverCmd.Flags().Lookup("domain"))
 	viper.BindPFlag("server.agent_inactivity_days", serverCmd.Flags().Lookup("agent-inactivity-days"))
+	viper.BindPFlag("oidc.issuer", serverCmd.Flags().Lookup("oidc-issuer"))
 }

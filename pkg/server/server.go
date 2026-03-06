@@ -99,6 +99,7 @@ func New(cfg Config) (*Server, error) {
 			DefaultTTL:    1 * time.Hour,
 			MaxTTL:        24 * time.Hour,
 			TokenProvider: s.newOIDCTokenProvider(),
+			KeyStore:      s.newOIDCKeyStore(),
 		})
 		if err != nil {
 			logger.Warn("failed to initialize OIDC provider", "error", err)
@@ -255,6 +256,46 @@ func (s *Server) newOIDCTokenProvider() oidc.TokenProvider {
 // OIDCProvider returns the OIDC provider (for key management, etc.)
 func (s *Server) OIDCProvider() *oidc.Provider {
 	return s.oidcProvider
+}
+
+// newOIDCKeyStore creates a KeyStore adapter backed by the database
+func (s *Server) newOIDCKeyStore() oidc.KeyStore {
+	return oidc.NewKeyStoreAdapter(
+		// CreateOIDCKey
+		func(keyID, privateKeyPEM string, isCurrent bool) error {
+			_, err := s.store.CreateOIDCKey(keyID, privateKeyPEM, isCurrent)
+			return err
+		},
+		// ListOIDCKeys
+		func() ([]oidc.StoredKey, error) {
+			keys, err := s.store.ListOIDCKeys()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]oidc.StoredKey, len(keys))
+			for i, k := range keys {
+				result[i] = oidc.ConvertStoredKey(k.KeyID, k.PrivateKey, k.IsCurrent, k.CreatedAt)
+			}
+			return result, nil
+		},
+		// GetCurrentOIDCKey
+		func() (*oidc.StoredKey, error) {
+			k, err := s.store.GetCurrentOIDCKey()
+			if err != nil {
+				return nil, err
+			}
+			sk := oidc.ConvertStoredKey(k.KeyID, k.PrivateKey, k.IsCurrent, k.CreatedAt)
+			return &sk, nil
+		},
+		// SetCurrentOIDCKey
+		func(keyID string) error {
+			return s.store.SetCurrentOIDCKey(keyID)
+		},
+		// DeleteOIDCKey
+		func(keyID string) error {
+			return s.store.DeleteOIDCKey(keyID)
+		},
+	)
 }
 
 func (s *Server) Handler() http.Handler {
