@@ -147,10 +147,9 @@ var agentListCmd = &cobra.Command{
 	},
 }
 
-var agentDeleteCmd = &cobra.Command{
-	Use:     "delete [name]",
-	Aliases: []string{"remove", "rm"},
-	Short:   "Delete an agent",
+var agentRemoveCmd = &cobra.Command{
+	Use:   "remove [name]",
+	Short: "Remove an agent",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -175,7 +174,7 @@ var agentDeleteCmd = &cobra.Command{
 			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
 		}
 
-		fmt.Printf("Agent deleted: %s\n", name)
+		fmt.Printf("Agent removed: %s\n", name)
 		return nil
 	},
 }
@@ -184,7 +183,7 @@ func init() {
 	rootCmd.AddCommand(agentCmd)
 	agentCmd.AddCommand(agentCreateCmd)
 	agentCmd.AddCommand(agentListCmd)
-	agentCmd.AddCommand(agentDeleteCmd)
+	agentCmd.AddCommand(agentRemoveCmd)
 
 	agentCreateCmd.Flags().StringSlice("can", []string{}, "Scopes this agent can request (e.g., github:read,write)")
 }
