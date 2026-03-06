@@ -3,6 +3,7 @@ package oidc
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 )
@@ -47,7 +48,8 @@ func HashClientSecret(secret string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// ValidateClientSecret compares a secret against its hash
+// ValidateClientSecret compares a secret against its hash using constant-time comparison
 func ValidateClientSecret(secret, hash string) bool {
-	return HashClientSecret(secret) == hash
+	computed := HashClientSecret(secret)
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) == 1
 }
