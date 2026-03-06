@@ -8,14 +8,16 @@ import (
 )
 
 type PendingEnrollment struct {
-	ID        string
-	Name      string
-	Secret    string // Client uses this to poll for approval
-	Status    string // pending, approved, rejected
-	Token     string // Set when approved (only returned once)
-	Scopes    string
-	AgentID   string // Set for amendments (existing agent requesting more scopes)
-	CreatedAt time.Time
+	ID               string
+	Name             string
+	Secret           string // Client uses this to poll for approval
+	Status           string // pending, approved, rejected
+	Token            string // Set when approved (only returned once)
+	Scopes           string
+	AgentID          string  // Set for amendments (existing agent requesting more scopes)
+	OIDCClientID     *string // Set when approved (only returned once)
+	OIDCClientSecret *string // Set when approved (only returned once, raw secret)
+	CreatedAt        time.Time
 }
 
 // IsAmendment returns true if this is an amendment request for an existing agent
@@ -47,6 +49,10 @@ func (s *Store) migrateEnroll() error {
 	
 	// Add agent_id column if it doesn't exist (migration for existing DBs)
 	s.db.Exec(`ALTER TABLE pending_enrollments ADD COLUMN agent_id TEXT`)
+	
+	// Add OIDC columns for enrollment pickup
+	s.db.Exec(`ALTER TABLE pending_enrollments ADD COLUMN oidc_client_id TEXT`)
+	s.db.Exec(`ALTER TABLE pending_enrollments ADD COLUMN oidc_client_secret TEXT`)
 	
 	return nil
 }
@@ -101,16 +107,22 @@ func (s *Store) GetPendingEnrollment(id string) (*PendingEnrollment, error) {
 // GetPendingEnrollmentBySecret gets an enrollment by its secret (for client polling)
 func (s *Store) GetPendingEnrollmentBySecret(secret string) (*PendingEnrollment, error) {
 	var e PendingEnrollment
-	var tokenHash sql.NullString
+	var tokenHash, oidcClientID, oidcClientSecret sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, name, secret, status, token_hash, scopes, created_at FROM pending_enrollments WHERE secret = ?`,
+		`SELECT id, name, secret, status, token_hash, scopes, oidc_client_id, oidc_client_secret, created_at FROM pending_enrollments WHERE secret = ?`,
 		secret,
-	).Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &tokenHash, &e.Scopes, &e.CreatedAt)
+	).Scan(&e.ID, &e.Name, &e.Secret, &e.Status, &tokenHash, &e.Scopes, &oidcClientID, &oidcClientSecret, &e.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if tokenHash.Valid {
 		e.Token = tokenHash.String
+	}
+	if oidcClientID.Valid {
+		e.OIDCClientID = &oidcClientID.String
+	}
+	if oidcClientSecret.Valid {
+		e.OIDCClientSecret = &oidcClientSecret.String
 	}
 	return &e, nil
 }
@@ -182,6 +194,15 @@ func (s *Store) ApproveAgentEnrollment(id string, tokenHash string, scopes strin
 	return err
 }
 
+// ApproveAgentEnrollmentWithOIDC approves with OIDC credentials for pickup
+func (s *Store) ApproveAgentEnrollmentWithOIDC(id string, tokenHash string, scopes string, oidcClientID, oidcClientSecret string) error {
+	_, err := s.db.Exec(
+		`UPDATE pending_enrollments SET status = 'approved', token_hash = ?, scopes = ?, oidc_client_id = ?, oidc_client_secret = ? WHERE id = ? AND status = 'pending'`,
+		tokenHash, scopes, oidcClientID, oidcClientSecret, id,
+	)
+	return err
+}
+
 // RejectEnrollment rejects an enrollment request
 func (s *Store) RejectEnrollment(id string) error {
 	_, err := s.db.Exec(
@@ -195,6 +216,20 @@ func (s *Store) RejectEnrollment(id string) error {
 func (s *Store) DeletePendingEnrollment(id string) error {
 	_, err := s.db.Exec(`DELETE FROM pending_enrollments WHERE id = ?`, id)
 	return err
+}
+
+// CleanupApprovedEnrollments removes approved enrollments older than maxAge
+// This ensures plaintext OIDC secrets don't persist indefinitely if never picked up
+func (s *Store) CleanupApprovedEnrollments(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-maxAge)
+	result, err := s.db.Exec(
+		`DELETE FROM pending_enrollments WHERE status = 'approved' AND created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // CleanupOldEnrollments removes enrollments older than the given duration

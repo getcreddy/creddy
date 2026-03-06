@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/getcreddy/creddy/pkg/logger"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,10 +15,13 @@ import (
 	"time"
 
 	"github.com/getcreddy/creddy/pkg/backend"
+	"github.com/getcreddy/creddy/pkg/logger"
+	"github.com/getcreddy/creddy/pkg/oidc"
 	pluginpkg "github.com/getcreddy/creddy/pkg/plugin"
+	"github.com/getcreddy/creddy/pkg/policy"
 	"github.com/getcreddy/creddy/pkg/signing"
 	"github.com/getcreddy/creddy/pkg/store"
-	"github.com/getcreddy/creddy/pkg/policy"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type Server struct {
@@ -26,9 +29,11 @@ type Server struct {
 	backends             *backend.Manager
 	pluginLoader         *pluginpkg.Loader
 	domain               string
+	publicURL            string // Public URL for agents (OIDC issuer or configured URL)
 	agentInactivityLimit time.Duration
 	localAdminToken      string
 	policyEngine         *policy.Engine
+	oidcProvider         *oidc.Provider
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
@@ -40,6 +45,7 @@ type Config struct {
 	AgentInactivityLimit time.Duration  // Auto-unenroll agents inactive for this long (0 = disabled)
 	PluginLoader         *pluginpkg.Loader // Plugin loader for hot-reload support
 	PolicyEngine         *policy.Engine
+	OIDCIssuer           string         // OIDC issuer URL (e.g., https://creddy.example.com)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -63,6 +69,7 @@ func New(cfg Config) (*Server, error) {
 		backends:             backend.NewManager(),
 		pluginLoader:         cfg.PluginLoader,
 		domain:               domain,
+		publicURL:            cfg.OIDCIssuer, // Use OIDC issuer as public URL
 		agentInactivityLimit: cfg.AgentInactivityLimit,
 		localAdminToken:      localAdminToken,
 		policyEngine:         cfg.PolicyEngine,
@@ -84,9 +91,27 @@ func New(cfg Config) (*Server, error) {
 
 	// Start the reapers
 	go s.reapExpiredCredentials()
+	go s.reapExpiredPolicyAgents() // Always run - handles expires_in TTL
+	go s.reapStaleEnrollments()    // Clean up approved enrollments with plaintext secrets
 	if s.agentInactivityLimit > 0 {
 		go s.reapInactiveAgents()
-	go s.reapExpiredPolicyAgents()
+	}
+
+	// Initialize OIDC provider if issuer is configured
+	if cfg.OIDCIssuer != "" {
+		oidcProvider, err := oidc.NewProvider(oidc.Config{
+			Issuer:        cfg.OIDCIssuer,
+			DefaultTTL:    1 * time.Hour,
+			MaxTTL:        24 * time.Hour,
+			TokenProvider: s.newOIDCTokenProvider(),
+			KeyStore:      s.newOIDCKeyStore(),
+		})
+		if err != nil {
+			logger.Warn("failed to initialize OIDC provider", "error", err)
+		} else {
+			s.oidcProvider = oidcProvider
+			logger.Info("OIDC provider initialized", "issuer", cfg.OIDCIssuer)
+		}
 	}
 
 	return s, nil
@@ -211,6 +236,230 @@ func (s *Server) Backends() *backend.Manager {
 	return s.backends
 }
 
+// newOIDCTokenProvider creates a TokenProvider that validates agents using the store
+func (s *Server) newOIDCTokenProvider() oidc.TokenProvider {
+	return oidc.NewStoreAdapter(func(clientID, clientSecret string) (*oidc.AgentInfo, error) {
+		var agent *store.Agent
+		var err error
+
+		// Try OIDC client_id first (agent_xxx format)
+		if strings.HasPrefix(clientID, "agent_") {
+			agent, err = s.store.GetAgentByClientID(clientID)
+			if err == nil && agent.ClientSecretHash != nil {
+				// Validate client_secret
+				if !oidc.ValidateClientSecret(clientSecret, *agent.ClientSecretHash) {
+					return nil, fmt.Errorf("invalid credentials")
+				}
+			} else {
+				return nil, fmt.Errorf("invalid credentials")
+			}
+		} else {
+			// Legacy mode: use agent name as client_id and ckr_ token as client_secret
+			agent, err = s.store.GetAgentByTokenHash(hashToken(clientSecret))
+			if err != nil {
+				return nil, fmt.Errorf("invalid credentials")
+			}
+
+			// Verify the client_id matches the agent name or ID
+			if agent.Name != clientID && agent.ID != clientID {
+				return nil, fmt.Errorf("invalid credentials")
+			}
+		}
+
+		// Update last used
+		s.store.UpdateAgentLastUsed(agent.ID)
+
+		return &oidc.AgentInfo{
+			ID:     agent.ID,
+			Name:   agent.Name,
+			Scopes: oidc.ParseScopes(agent.Scopes),
+		}, nil
+	})
+}
+
+// OIDCProvider returns the OIDC provider (for key management, etc.)
+func (s *Server) OIDCProvider() *oidc.Provider {
+	return s.oidcProvider
+}
+
+// authenticateAdmin validates a request has admin privileges
+// Returns the agent if authorized, or writes an error and returns nil
+func (s *Server) authenticateAdmin(w http.ResponseWriter, r *http.Request, requiredScope string) *store.Agent {
+	token := extractBearerToken(r)
+	
+	// Allow unauthenticated access from localhost for backward compatibility
+	if token == "" {
+		if isLocalRequest(r) {
+			return &store.Agent{Name: "local-admin", ID: "local"}
+		}
+		writeError(w, http.StatusUnauthorized, "admin authentication required")
+		return nil
+	}
+
+	agent, err := s.authenticateAgent(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
+		return nil
+	}
+
+	// Check for admin scope
+	if !agentHasScope(agent, requiredScope) {
+		writeError(w, http.StatusForbidden, "insufficient permissions: requires "+requiredScope)
+		return nil
+	}
+
+	return agent
+}
+
+// agentHasScope checks if an agent has a specific scope
+func agentHasScope(agent *store.Agent, required string) bool {
+	var scopes []string
+	json.Unmarshal([]byte(agent.Scopes), &scopes)
+
+	for _, scope := range scopes {
+		// Exact match
+		if scope == required {
+			return true
+		}
+		// Wildcard match: admin:* matches admin:agents:read
+		if strings.HasSuffix(scope, ":*") {
+			prefix := strings.TrimSuffix(scope, "*")
+			if strings.HasPrefix(required, prefix) {
+				return true
+			}
+		}
+		// Full wildcard
+		if scope == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalRequest checks if the request is from localhost
+func isLocalRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// No port, use as-is
+		host = r.RemoteAddr
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+// authenticateAgent validates a bearer token and returns the agent
+// Supports both OIDC JWTs (eyJ...) and legacy ckr_ tokens
+func (s *Server) authenticateAgent(token string) (*store.Agent, error) {
+	// Check if it looks like a JWT (starts with eyJ)
+	if strings.HasPrefix(token, "eyJ") && s.oidcProvider != nil {
+		// Parse and validate JWT
+		claims, err := s.validateOIDCToken(token)
+		if err != nil {
+			return nil, fmt.Errorf("invalid JWT: %w", err)
+		}
+
+		// Look up agent by ID from claims
+		agent, err := s.store.GetAgentByID(claims.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("agent not found")
+		}
+
+		// Update last used
+		s.store.UpdateAgentLastUsed(agent.ID)
+		return agent, nil
+	}
+
+	// Legacy token authentication
+	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	if err != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	s.store.UpdateAgentLastUsed(agent.ID)
+	return agent, nil
+}
+
+// validateOIDCToken validates an OIDC access token and returns its claims
+func (s *Server) validateOIDCToken(tokenStr string) (*oidc.AgentClaims, error) {
+	if s.oidcProvider == nil {
+		return nil, fmt.Errorf("OIDC not configured")
+	}
+
+	km := s.oidcProvider.KeyManager()
+
+	token, err := jwt.ParseWithClaims(tokenStr, &oidc.AgentClaims{}, func(token *jwt.Token) (interface{}, error) {
+		// Verify signing method
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, fmt.Errorf("missing kid header")
+		}
+
+		key, err := km.GetKey(kid)
+		if err != nil {
+			return nil, err
+		}
+		return &key.PrivateKey.PublicKey, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("token not valid")
+	}
+
+	claims, ok := token.Claims.(*oidc.AgentClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid claims type")
+	}
+
+	return claims, nil
+}
+
+// newOIDCKeyStore creates a KeyStore adapter backed by the database
+func (s *Server) newOIDCKeyStore() oidc.KeyStore {
+	return oidc.NewKeyStoreAdapter(
+		// CreateOIDCKey
+		func(keyID, privateKeyPEM string, isCurrent bool) error {
+			_, err := s.store.CreateOIDCKey(keyID, privateKeyPEM, isCurrent)
+			return err
+		},
+		// ListOIDCKeys
+		func() ([]oidc.StoredKey, error) {
+			keys, err := s.store.ListOIDCKeys()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]oidc.StoredKey, len(keys))
+			for i, k := range keys {
+				result[i] = oidc.ConvertStoredKey(k.KeyID, k.PrivateKey, k.IsCurrent, k.CreatedAt)
+			}
+			return result, nil
+		},
+		// GetCurrentOIDCKey
+		func() (*oidc.StoredKey, error) {
+			k, err := s.store.GetCurrentOIDCKey()
+			if err != nil {
+				return nil, err
+			}
+			sk := oidc.ConvertStoredKey(k.KeyID, k.PrivateKey, k.IsCurrent, k.CreatedAt)
+			return &sk, nil
+		},
+		// SetCurrentOIDCKey
+		func(keyID string) error {
+			return s.store.SetCurrentOIDCKey(keyID)
+		},
+		// DeleteOIDCKey
+		func(keyID string) error {
+			return s.store.DeleteOIDCKey(keyID)
+		},
+	)
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -234,6 +483,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/active", s.handleListActive)
 	mux.HandleFunc("DELETE /v1/active/{id}", s.handleRevokeCredential)
 	mux.HandleFunc("GET /v1/signing-key", s.handleGetSigningKey)
+	mux.HandleFunc("DELETE /v1/self", s.handleSelfDelete)
 
 	// Admin endpoints (no auth for now - bind to localhost/tailnet only)
 	mux.HandleFunc("GET /v1/admin/agents", s.handleListAgents)
@@ -257,6 +507,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Proxy endpoints (for backends that support proxy mode)
 	s.RegisterProxyRoutes(mux)
+
+	// OIDC endpoints (if enabled)
+	if s.oidcProvider != nil {
+		s.oidcProvider.RegisterRoutes(mux)
+	}
 
 	// Auth relay endpoints (for @creddy/auth CLI)
 
@@ -313,10 +568,10 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate agent token
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	// Validate agent - supports both OIDC JWTs and legacy ckr_ tokens
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization: "+err.Error())
 		return
 	}
 
@@ -429,9 +684,9 @@ func (s *Server) handleListActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -463,9 +718,9 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -492,6 +747,10 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 // Admin endpoints
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:read"); admin == nil {
+		return
+	}
+
 	agents, err := s.store.ListAgents()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agents")
@@ -513,9 +772,14 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:write"); admin == nil {
+		return
+	}
+
 	var req struct {
-		Name   string   `json:"name"`
-		Scopes []string `json:"scopes"`
+		Name      string   `json:"name"`
+		Scopes    []string `json:"scopes"`
+		ExpiresIn string   `json:"expires_in,omitempty"` // e.g., "4h", "24h"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -527,12 +791,34 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse TTL if provided
+	var expiresAt *time.Time
+	if req.ExpiresIn != "" {
+		ttl, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid expires_in: "+err.Error())
+			return
+		}
+		t := time.Now().Add(ttl)
+		expiresAt = &t
+	}
+
 	// Generate token
 	token := generateToken()
 	scopesJSON, _ := json.Marshal(req.Scopes)
 
-	agent, err := s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
+	var agent *store.Agent
+	var err error
+	if expiresAt != nil {
+		agent, err = s.store.CreateAgentWithPolicy(req.Name, hashToken(token), string(scopesJSON), "", expiresAt)
+	} else {
+		agent, err = s.store.CreateAgent(req.Name, hashToken(token), string(scopesJSON))
+	}
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			writeError(w, http.StatusConflict, "agent already exists: "+req.Name)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create agent: "+err.Error())
 		return
 	}
@@ -548,6 +834,20 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Generate OIDC client credentials (only if OIDC is enabled)
+	var oidcCreds *oidc.ClientCredentials
+	if s.oidcProvider != nil {
+		oidcCreds, err = oidc.GenerateClientCredentials()
+		if err != nil {
+			logger.Warn("failed to generate OIDC credentials", "agent", req.Name, "error", err)
+		} else {
+			if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+				logger.Warn("failed to store OIDC credentials", "agent", req.Name, "error", err)
+				oidcCreds = nil
+			}
+		}
+	}
+
 	// Audit log
 	details, _ := json.Marshal(map[string]interface{}{"scopes": req.Scopes})
 	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_created", "", string(details), "", r.RemoteAddr)
@@ -560,15 +860,35 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		"created_at": agent.CreatedAt,
 	}
 
+	if s.publicURL != "" {
+		response["server_url"] = s.publicURL
+	}
+
+	if expiresAt != nil {
+		response["expires_at"] = expiresAt
+	}
+
 	if keyPair != nil {
 		response["signing_key_id"] = keyPair.KeyID
 		response["signing_email"] = keyPair.Email
+	}
+
+	// Include OIDC credentials (only shown once!)
+	if oidcCreds != nil {
+		response["oidc"] = map[string]string{
+			"client_id":     oidcCreds.ClientID,
+			"client_secret": oidcCreds.ClientSecret,
+		}
 	}
 
 	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:agents:write"); admin == nil {
+		return
+	}
+
 	name := r.PathValue("name")
 
 	// Get agent to find their credentials
@@ -607,6 +927,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:read"); admin == nil {
+		return
+	}
+
 	backends, err := s.store.ListBackends()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list backends")
@@ -627,6 +951,10 @@ func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateBackend(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:write"); admin == nil {
+		return
+	}
+
 	var req struct {
 		Type   string          `json:"type"`
 		Name   string          `json:"name"`
@@ -671,6 +999,10 @@ func (s *Server) handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:write"); admin == nil {
+		return
+	}
+
 	name := r.PathValue("name")
 
 	if err := s.store.DeleteBackend(name); err != nil {
@@ -684,6 +1016,10 @@ func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:plugins:write"); admin == nil {
+		return
+	}
+
 	if s.pluginLoader == nil {
 		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
 		return
@@ -711,6 +1047,10 @@ func (s *Server) handlePluginReload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginReloadOne(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:plugins:write"); admin == nil {
+		return
+	}
+
 	if s.pluginLoader == nil {
 		writeError(w, http.StatusServiceUnavailable, "plugin loader not configured")
 		return
@@ -750,9 +1090,9 @@ func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -795,7 +1135,63 @@ func (s *Server) handleGetSigningKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleSelfDelete allows an agent to delete itself
+func (s *Server) handleSelfDelete(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization")
+		return
+	}
+
+	agent, err := s.authenticateAgent(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
+		return
+	}
+
+	// Revoke all active credentials from backends
+	creds, err := s.store.GetAllCredentialsByAgent(agent.ID)
+	if err != nil {
+		logger.Warn("failed to get credentials for agent", "name", agent.Name, "error", err)
+	} else {
+		for _, cred := range creds {
+			if cred.ExternalID != "" {
+				if b, err := s.backends.Get(cred.Backend); err == nil {
+					if rb, ok := b.(backend.RevocableBackend); ok {
+						if err := rb.RevokeToken(cred.ExternalID); err != nil {
+							logger.Warn("failed to revoke token", "backend", cred.Backend, "error", err)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Delete all active credentials
+	s.store.DeleteActiveCredentialsByAgent(agent.ID)
+
+	// Delete signing key
+	s.store.DeleteSigningKey(agent.ID)
+
+	// Delete the agent
+	if err := s.store.DeleteAgent(agent.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete agent")
+		return
+	}
+
+	// Audit log (before deletion completes)
+	s.store.LogAuditEvent(agent.ID, agent.Name, "agent_self_deleted", "", "", "", r.RemoteAddr)
+
+	logger.Info("agent self-deleted", "name", agent.Name, "id", agent.ID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:audit:read"); admin == nil {
+		return
+	}
+
 	// Parse query params
 	limitStr := r.URL.Query().Get("limit")
 	limit := 100
@@ -831,6 +1227,10 @@ func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPublicKeys(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:keys:read"); admin == nil {
+		return
+	}
+
 	keys, err := s.store.ListPublicKeys()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list keys")
@@ -861,9 +1261,9 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -1031,9 +1431,9 @@ func (s *Server) handleScopeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.GetAgentByTokenHash(hashToken(token))
+	agent, err := s.authenticateAgent(token)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid agent token")
+		writeError(w, http.StatusUnauthorized, "invalid authorization")
 		return
 	}
 
@@ -1090,23 +1490,25 @@ func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
 		"status": enrollment.Status,
 	}
 
-	// If approved, return the token (only works once - client should save it)
+	// If approved, return the credentials (only works once - client should save them)
 	if enrollment.Status == "approved" && enrollment.Token != "" {
-		// Get the agent that was created
-		agent, err := s.store.GetAgentByTokenHash(enrollment.Token)
-		if err == nil {
-			// Generate the actual token to return (we stored the hash)
-			// Actually, we need to store the token temporarily for pickup
-			// Let's return it from a separate field we'll add
-		}
-		_ = agent // TODO: include agent info
-
-		// For now, the token was stored as hash - we need to change approach
-		// Store the actual token encrypted or in a pickup field
 		response["token"] = enrollment.Token
 		response["scopes"] = enrollment.Scopes
 
-		// Delete the enrollment after token pickup
+		// Include OIDC credentials if available
+		if enrollment.OIDCClientID != nil && enrollment.OIDCClientSecret != nil {
+			response["oidc"] = map[string]string{
+				"client_id":     *enrollment.OIDCClientID,
+				"client_secret": *enrollment.OIDCClientSecret,
+			}
+		}
+
+		// Include server URL if configured
+		if s.publicURL != "" {
+			response["server_url"] = s.publicURL
+		}
+
+		// Delete the enrollment after credential pickup
 		s.store.DeletePendingEnrollment(enrollment.ID)
 	}
 
@@ -1114,6 +1516,10 @@ func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:read"); admin == nil {
+		return
+	}
+
 	enrollments, err := s.store.ListPendingEnrollments()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list pending enrollments")
@@ -1139,6 +1545,10 @@ func (s *Server) handleListPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	// Get the enrollment
@@ -1235,8 +1645,26 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Generate OIDC client credentials (only if OIDC is enabled)
+	var oidcCreds *oidc.ClientCredentials
+	if s.oidcProvider != nil {
+		oidcCreds, err = oidc.GenerateClientCredentials()
+		if err != nil {
+			logger.Warn("failed to generate OIDC credentials", "agent", enrollment.Name, "error", err)
+		} else {
+			if err := s.store.SetAgentOIDCCredentials(agent.ID, oidcCreds.ClientID, oidcCreds.SecretHash); err != nil {
+				logger.Warn("failed to store OIDC credentials", "agent", enrollment.Name, "error", err)
+				oidcCreds = nil
+			}
+		}
+	}
+
 	// Update enrollment with the token (not hashed - client needs to pick it up)
-	s.store.ApproveAgentEnrollment(id, token, scopesJSON)
+	if oidcCreds != nil {
+		s.store.ApproveAgentEnrollmentWithOIDC(id, token, scopesJSON, oidcCreds.ClientID, oidcCreds.ClientSecret)
+	} else {
+		s.store.ApproveAgentEnrollment(id, token, scopesJSON)
+	}
 
 	// Audit log
 	details, _ := json.Marshal(map[string]interface{}{"scopes": scopesJSON, "enrollment_id": id})
@@ -1253,6 +1681,10 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRejectPending(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:enrollments:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	enrollment, err := s.store.GetPendingEnrollment(id)
@@ -1436,6 +1868,10 @@ func agentCanAccessBackend(agent *store.Agent, backendName string, repos []strin
 
 // handleListAllTokens lists all active tokens (admin)
 func (s *Server) handleListAllTokens(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:tokens:read"); admin == nil {
+		return
+	}
+
 	backend := r.URL.Query().Get("backend")
 	agentName := r.URL.Query().Get("agent")
 
@@ -1488,6 +1924,10 @@ func (s *Server) handleListAllTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminRevokeToken revokes a token by ID (admin)
 func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:tokens:write"); admin == nil {
+		return
+	}
+
 	id := r.PathValue("id")
 
 	cred, err := s.store.GetActiveCredential(id)
@@ -1529,6 +1969,30 @@ func (s *Server) reapExpiredPolicyAgents() {
 				if err := s.store.DeleteAgent(agent.ID); err != nil {
 					logger.Error("error deleting expired agent", "name", agent.Name, "error", err)
 				}
+			}
+		}
+	}
+}
+
+// reapStaleEnrollments removes approved enrollments that haven't been picked up
+// This prevents plaintext OIDC secrets from persisting indefinitely
+func (s *Server) reapStaleEnrollments() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Clean up approved enrollments older than 1 hour
+			count, err := s.store.CleanupApprovedEnrollments(1 * time.Hour)
+			if err != nil {
+				logger.Error("error cleaning up stale enrollments", "error", err)
+				continue
+			}
+			if count > 0 {
+				logger.Info("cleaned up stale approved enrollments", "count", count)
 			}
 		}
 	}

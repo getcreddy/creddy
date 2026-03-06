@@ -13,14 +13,16 @@ type Store struct {
 }
 
 type Agent struct {
-	ID        string
-	Name      string
-	TokenHash string
-	Scopes    string // JSON array
-	CreatedAt time.Time
-	LastUsed  *time.Time
-	PolicyName *string
-	ExpiresAt  *time.Time
+	ID               string
+	Name             string
+	TokenHash        string
+	Scopes           string // JSON array
+	CreatedAt        time.Time
+	LastUsed         *time.Time
+	PolicyName       *string
+	ExpiresAt        *time.Time
+	ClientID         *string // OIDC client_id (generated, e.g., "agent_abc123")
+	ClientSecretHash *string // OIDC client_secret hash
 }
 
 type Backend struct {
@@ -108,12 +110,19 @@ func (s *Store) migrate() error {
 	if err := s.migrateClients(); err != nil {
 		return err
 	}
+	if err := s.migrateOIDCKeys(); err != nil {
+		return err
+	}
 
 	// Add external_id column if it doesn't exist (for revocable backends)
 	s.db.Exec(`ALTER TABLE active_credentials ADD COLUMN external_id TEXT`)
 	// Add policy columns to agents
 	s.db.Exec(`ALTER TABLE agents ADD COLUMN policy_name TEXT`)
 	s.db.Exec(`ALTER TABLE agents ADD COLUMN expires_at DATETIME`)
+	// Add OIDC columns to agents
+	s.db.Exec(`ALTER TABLE agents ADD COLUMN client_id TEXT`)
+	s.db.Exec(`ALTER TABLE agents ADD COLUMN client_secret_hash TEXT`)
+	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_client_id ON agents(client_id)`)
 
 	return nil
 }
@@ -157,9 +166,9 @@ func (s *Store) CreateAgentWithPolicy(name, tokenHash, scopes, policyName string
 func (s *Store) GetAgentByID(id string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE id = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash FROM agents WHERE id = ?`,
 		id,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash)
 	if err != nil {
 		return nil, err
 	}
@@ -169,9 +178,9 @@ func (s *Store) GetAgentByID(id string) (*Agent, error) {
 func (s *Store) GetAgentByName(name string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE name = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash FROM agents WHERE name = ?`,
 		name,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash)
 	if err != nil {
 		return nil, err
 	}
@@ -181,9 +190,9 @@ func (s *Store) GetAgentByName(name string) (*Agent, error) {
 func (s *Store) GetAgentByTokenHash(hash string) (*Agent, error) {
 	var a Agent
 	err := s.db.QueryRow(
-		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents WHERE token_hash = ?`,
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash FROM agents WHERE token_hash = ?`,
 		hash,
-	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt)
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +200,7 @@ func (s *Store) GetAgentByTokenHash(hash string) (*Agent, error) {
 }
 
 func (s *Store) ListAgents() ([]*Agent, error) {
-	rows, err := s.db.Query(`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at FROM agents ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +209,7 @@ func (s *Store) ListAgents() ([]*Agent, error) {
 	var agents []*Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash); err != nil {
 			return nil, err
 		}
 		agents = append(agents, &a)
@@ -210,6 +219,28 @@ func (s *Store) ListAgents() ([]*Agent, error) {
 
 func (s *Store) UpdateAgentLastUsed(id string) error {
 	_, err := s.db.Exec(`UPDATE agents SET last_used = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
+}
+
+// GetAgentByClientID gets an agent by its OIDC client_id
+func (s *Store) GetAgentByClientID(clientID string) (*Agent, error) {
+	var a Agent
+	err := s.db.QueryRow(
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash FROM agents WHERE client_id = ?`,
+		clientID,
+	).Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash)
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// SetAgentOIDCCredentials sets the OIDC client credentials for an agent
+func (s *Store) SetAgentOIDCCredentials(agentID, clientID, clientSecretHash string) error {
+	_, err := s.db.Exec(
+		`UPDATE agents SET client_id = ?, client_secret_hash = ? WHERE id = ?`,
+		clientID, clientSecretHash, agentID,
+	)
 	return err
 }
 
@@ -377,6 +408,11 @@ func (s *Store) DeleteActiveCredential(id string) error {
 	return err
 }
 
+func (s *Store) DeleteActiveCredentialsByAgent(agentID string) error {
+	_, err := s.db.Exec(`DELETE FROM active_credentials WHERE agent_id = ?`, agentID)
+	return err
+}
+
 // GetExpiredCredentials returns credentials that have expired (for revocation)
 func (s *Store) GetExpiredCredentials() ([]*ActiveCredential, error) {
 	rows, err := s.db.Query(
@@ -446,10 +482,10 @@ func (s *Store) DeleteAllCredentialsByAgent(agentID string) error {
 	return err
 }
 
-// GetExpiredPolicyAgents returns agents whose policy-based expires_at has passed
+// GetExpiredPolicyAgents returns agents whose expires_at has passed
 func (s *Store) GetExpiredPolicyAgents() ([]*Agent, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at 
+		`SELECT id, name, token_hash, scopes, created_at, last_used, policy_name, expires_at, client_id, client_secret_hash 
 		 FROM agents 
 		 WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`,
 	)
@@ -461,7 +497,7 @@ func (s *Store) GetExpiredPolicyAgents() ([]*Agent, error) {
 	var agents []*Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.TokenHash, &a.Scopes, &a.CreatedAt, &a.LastUsed, &a.PolicyName, &a.ExpiresAt, &a.ClientID, &a.ClientSecretHash); err != nil {
 			return nil, err
 		}
 		agents = append(agents, &a)
