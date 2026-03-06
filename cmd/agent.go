@@ -17,18 +17,23 @@ import (
 
 // addAdminToken adds the local admin token to the request if available
 func addAdminToken(req *http.Request) {
-	dataDir := viper.GetString("data-dir")
-	if dataDir == "" {
-		// Check common locations
-		if home, err := os.UserHomeDir(); err == nil {
-			dataDir = filepath.Join(home, ".creddy")
-		}
+	// Build list of possible token locations
+	// Server writes to directory containing database.path
+	var tokenPaths []string
+
+	// Check database.path config (same as server uses)
+	if dbPath := viper.GetString("database.path"); dbPath != "" {
+		tokenPaths = append(tokenPaths, filepath.Join(filepath.Dir(dbPath), ".admin-token"))
 	}
-	// Also check /var/lib/creddy for system installs
-	tokenPaths := []string{
-		filepath.Join(dataDir, ".admin-token"),
-		"/var/lib/creddy/.admin-token",
+
+	// Check common locations
+	if home, err := os.UserHomeDir(); err == nil {
+		tokenPaths = append(tokenPaths, filepath.Join(home, ".creddy", ".admin-token"))
 	}
+
+	// System install location
+	tokenPaths = append(tokenPaths, "/var/lib/creddy/.admin-token")
+
 	for _, path := range tokenPaths {
 		if token, err := os.ReadFile(path); err == nil {
 			req.Header.Set("Authorization", "Bearer "+string(token))
