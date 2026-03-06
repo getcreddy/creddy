@@ -56,6 +56,7 @@ var agentCreateCmd = &cobra.Command{
 			Scopes    []string  `json:"scopes"`
 			CreatedAt time.Time `json:"created_at"`
 			ExpiresAt *time.Time `json:"expires_at,omitempty"`
+			ServerURL string    `json:"server_url,omitempty"`
 			OIDC      *struct {
 				ClientID     string `json:"client_id"`
 				ClientSecret string `json:"client_secret"`
@@ -91,13 +92,19 @@ var agentCreateCmd = &cobra.Command{
 			fmt.Printf("  Email:  %s\n", result.SigningEmail)
 		}
 
+		// Use public URL from server if available, otherwise fall back to local URL
+		displayURL := serverURL
+		if result.ServerURL != "" {
+			displayURL = result.ServerURL
+		}
+
 		fmt.Printf("\nSet on agent machines:\n")
-		fmt.Printf("  export CREDDY_URL=%s\n", serverURL)
+		fmt.Printf("  export CREDDY_URL=%s\n", displayURL)
 		fmt.Printf("  export CREDDY_TOKEN=%s\n", result.Token)
 
 		if result.OIDC != nil {
 			fmt.Printf("\nOr use OIDC:\n")
-			fmt.Printf("  export CREDDY_URL=%s\n", serverURL)
+			fmt.Printf("  export CREDDY_URL=%s\n", displayURL)
 			fmt.Printf("  export CREDDY_CLIENT_ID=%s\n", result.OIDC.ClientID)
 			fmt.Printf("  export CREDDY_CLIENT_SECRET=%s\n", result.OIDC.ClientSecret)
 		}

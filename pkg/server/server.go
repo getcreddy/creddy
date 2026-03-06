@@ -28,6 +28,7 @@ type Server struct {
 	backends             *backend.Manager
 	pluginLoader         *pluginpkg.Loader
 	domain               string
+	publicURL            string // Public URL for agents (OIDC issuer or configured URL)
 	agentInactivityLimit time.Duration
 	localAdminToken      string
 	policyEngine         *policy.Engine
@@ -67,6 +68,7 @@ func New(cfg Config) (*Server, error) {
 		backends:             backend.NewManager(),
 		pluginLoader:         cfg.PluginLoader,
 		domain:               domain,
+		publicURL:            cfg.OIDCIssuer, // Use OIDC issuer as public URL
 		agentInactivityLimit: cfg.AgentInactivityLimit,
 		localAdminToken:      localAdminToken,
 		policyEngine:         cfg.PolicyEngine,
@@ -848,6 +850,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		"token":      token, // Only shown once!
 		"scopes":     req.Scopes,
 		"created_at": agent.CreatedAt,
+	}
+
+	if s.publicURL != "" {
+		response["server_url"] = s.publicURL
 	}
 
 	if expiresAt != nil {
