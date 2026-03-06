@@ -445,6 +445,18 @@ func promptForField(reader *bufio.Reader, field ConfigField) (interface{}, error
 		case "secret", "string":
 			return input, nil
 
+		case "array":
+			// Split on commas and trim whitespace
+			parts := strings.Split(input, ",")
+			result := make([]string, 0, len(parts))
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					result = append(result, p)
+				}
+			}
+			return result, nil
+
 		default:
 			return input, nil
 		}
