@@ -7,12 +7,35 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+// addAdminToken adds the local admin token to the request if available
+func addAdminToken(req *http.Request) {
+	dataDir := viper.GetString("data-dir")
+	if dataDir == "" {
+		// Check common locations
+		if home, err := os.UserHomeDir(); err == nil {
+			dataDir = filepath.Join(home, ".creddy")
+		}
+	}
+	// Also check /var/lib/creddy for system installs
+	tokenPaths := []string{
+		filepath.Join(dataDir, ".admin-token"),
+		"/var/lib/creddy/.admin-token",
+	}
+	for _, path := range tokenPaths {
+		if token, err := os.ReadFile(path); err == nil {
+			req.Header.Set("Authorization", "Bearer "+string(token))
+			return
+		}
+	}
+}
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
@@ -37,7 +60,14 @@ var agentCreateCmd = &cobra.Command{
 			"scopes": scopes,
 		})
 
-		resp, err := http.Post(serverURL+"/v1/admin/agents", "application/json", bytes.NewReader(reqBody))
+		req, err := http.NewRequest("POST", serverURL+"/v1/admin/agents", bytes.NewReader(reqBody))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		addAdminToken(req)
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
 		}
@@ -122,7 +152,13 @@ var agentListCmd = &cobra.Command{
 			serverURL = "http://127.0.0.1:8400"
 		}
 
-		resp, err := http.Get(serverURL + "/v1/admin/agents")
+		req, err := http.NewRequest("GET", serverURL+"/v1/admin/agents", nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		addAdminToken(req)
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
 		}
@@ -167,6 +203,7 @@ var agentRemoveCmd = &cobra.Command{
 		}
 
 		req, _ := http.NewRequest("DELETE", serverURL+"/v1/admin/agents/"+name, nil)
+		addAdminToken(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server: %w", err)
