@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -287,13 +286,14 @@ func (s *Server) OIDCProvider() *oidc.Provider {
 func (s *Server) authenticateAdmin(w http.ResponseWriter, r *http.Request, requiredScope string) *store.Agent {
 	token := extractBearerToken(r)
 	
-	// Allow unauthenticated access from localhost for backward compatibility
 	if token == "" {
-		if isLocalRequest(r) {
-			return &store.Agent{Name: "local-admin", ID: "local"}
-		}
 		writeError(w, http.StatusUnauthorized, "admin authentication required")
 		return nil
+	}
+
+	// Check for local admin token (written to .admin-token file)
+	if token == s.localAdminToken {
+		return &store.Agent{Name: "local-admin", ID: "local", Scopes: `["admin:*"]`}
 	}
 
 	agent, err := s.authenticateAgent(token)
@@ -336,15 +336,7 @@ func agentHasScope(agent *store.Agent, required string) bool {
 	return false
 }
 
-// isLocalRequest checks if the request is from localhost
-func isLocalRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		// No port, use as-is
-		host = r.RemoteAddr
-	}
-	return host == "127.0.0.1" || host == "::1" || host == "localhost"
-}
+
 
 // authenticateAgent validates a bearer token and returns the agent
 // Supports both OIDC JWTs (eyJ...) and legacy ckr_ tokens
