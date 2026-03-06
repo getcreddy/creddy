@@ -22,7 +22,7 @@ AIP addresses these challenges by:
 - Using OIDC for agent authentication and identity tokens
 - Defining agent-specific claims for identity and scoping
 - Providing a credential exchange endpoint for ephemeral tokens
-- Supporting multiple authentication methods (OIDC native and legacy tokens)
+- Supporting multiple authentication methods (OIDC and vend tokens)
 
 ## 2. Terminology
 
@@ -207,16 +207,16 @@ curl https://creddy.example.com/v1/credentials/github \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-### 6.2 Legacy Token
+### 6.2 Vend Token
 
-For backward compatibility, agents may use `ckr_` tokens directly:
+Agents may use vend tokens (`ckr_`) directly, bypassing the OAuth exchange:
 
 ```bash
 curl https://creddy.example.com/v1/credentials/github \
   -H "Authorization: Bearer ckr_xxx"
 ```
 
-Legacy tokens are detected by their prefix and validated against the token hash.
+Vend tokens are detected by their prefix and validated against a stored hash.
 
 ## 7. Agent Enrollment
 
@@ -294,7 +294,7 @@ Common errors:
 
 | Credential Type | Format | Example |
 |-----------------|--------|---------|
-| Legacy Token | `ckr_` + 48 hex | `ckr_abc123...` |
+| Vend Token | `ckr_` + 48 hex | `ckr_abc123...` |
 | Client ID | `agent_` + 12 hex | `agent_abc123` |
 | Client Secret | `cks_` + 32 hex | `cks_xyz789...` |
 

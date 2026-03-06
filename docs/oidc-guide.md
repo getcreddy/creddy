@@ -38,7 +38,7 @@ Output:
 }
 ```
 
-Save both the legacy token and OIDC credentials.
+Save both the vend token and OIDC credentials.
 
 ### 3. Get Access Token
 
@@ -117,10 +117,10 @@ TOKEN=$(curl -s -X POST https://creddy.example.com/oauth/token \
 curl -H "Authorization: Bearer $TOKEN" ...
 ```
 
-### Legacy
+### Vend
 
 ```bash
-# Use ckr_ token directly
+# Use vend token directly (no OAuth exchange)
 curl -H "Authorization: Bearer ckr_xxx" ...
 ```
 
