@@ -274,6 +274,16 @@ func ExtractReposFromScopes(scopes []string) (repos []string, readOnly bool) {
 			perm = "write"
 		}
 
+		// Handle shorthand: "github:read" or "github:write" means all repos
+		if rest == "read" || rest == "write" {
+			if rest == "read" {
+				perm = "read"
+			} else {
+				perm = "write"
+			}
+			rest = "*" // Treat as all repos
+		}
+
 		if perm == "write" {
 			readOnly = false
 		}
