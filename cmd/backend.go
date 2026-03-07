@@ -137,11 +137,67 @@ var backendRemoveCmd = &cobra.Command{
 	},
 }
 
+var backendInspectCmd = &cobra.Command{
+	Use:   "inspect [name]",
+	Short: "Show backend configuration",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+
+		serverURL := viper.GetString("admin.url")
+		if serverURL == "" {
+			serverURL = "http://127.0.0.1:8400"
+		}
+
+		req, err := http.NewRequest("GET", serverURL+"/v1/admin/backends/"+name, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		addAdminToken(req)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to connect to server: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("backend not found: %s", name)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+		}
+
+		var result struct {
+			ID        string                 `json:"id"`
+			Type      string                 `json:"type"`
+			Name      string                 `json:"name"`
+			Config    map[string]interface{} `json:"config"`
+			CreatedAt time.Time              `json:"created_at"`
+		}
+		json.Unmarshal(body, &result)
+
+		fmt.Printf("Name:    %s\n", result.Name)
+		fmt.Printf("Type:    %s\n", result.Type)
+		fmt.Printf("Created: %s\n", result.CreatedAt.Format(time.RFC3339))
+		fmt.Printf("Config:\n")
+		
+		// Pretty print config
+		configJSON, _ := json.MarshalIndent(result.Config, "  ", "  ")
+		fmt.Printf("  %s\n", string(configJSON))
+
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(backendCmd)
 	backendCmd.AddCommand(backendAddCmd)
 	backendCmd.AddCommand(backendListCmd)
 	backendCmd.AddCommand(backendRemoveCmd)
+	backendCmd.AddCommand(backendInspectCmd)
 }
 
 // addBackendDynamic handles the backend add command with dynamic schema support

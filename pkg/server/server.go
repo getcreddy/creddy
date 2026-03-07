@@ -482,6 +482,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/agents", s.handleCreateAgent)
 	mux.HandleFunc("DELETE /v1/admin/agents/{name}", s.handleDeleteAgent)
 	mux.HandleFunc("GET /v1/admin/backends", s.handleListBackends)
+	mux.HandleFunc("GET /v1/admin/backends/{name}", s.handleGetBackend)
 	mux.HandleFunc("POST /v1/admin/backends", s.handleCreateBackend)
 	mux.HandleFunc("DELETE /v1/admin/backends/{name}", s.handleDeleteBackend)
 	mux.HandleFunc("GET /v1/admin/audit", s.handleGetAuditLog)
@@ -940,6 +941,44 @@ func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(results)
+}
+
+func (s *Server) handleGetBackend(w http.ResponseWriter, r *http.Request) {
+	if admin := s.authenticateAdmin(w, r, "admin:backends:read"); admin == nil {
+		return
+	}
+
+	name := r.PathValue("name")
+
+	backend, err := s.store.GetBackendByName(name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "backend not found")
+		return
+	}
+
+	// Parse config to return as object (masking secrets)
+	var config map[string]interface{}
+	if backend.Config != "" {
+		json.Unmarshal([]byte(backend.Config), &config)
+		// Mask sensitive fields
+		for key := range config {
+			keyLower := strings.ToLower(key)
+			if strings.Contains(keyLower, "key") || strings.Contains(keyLower, "secret") ||
+				strings.Contains(keyLower, "token") || strings.Contains(keyLower, "password") {
+				if str, ok := config[key].(string); ok && len(str) > 8 {
+					config[key] = str[:4] + "..." + str[len(str)-4:]
+				}
+			}
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":         backend.ID,
+		"type":       backend.Type,
+		"name":       backend.Name,
+		"config":     config,
+		"created_at": backend.CreatedAt,
+	})
 }
 
 func (s *Server) handleCreateBackend(w http.ResponseWriter, r *http.Request) {
