@@ -296,12 +296,6 @@ func (s *Server) authenticateAdmin(w http.ResponseWriter, r *http.Request, requi
 		return &store.Agent{Name: "local-admin", ID: "local", Scopes: `["admin:*"]`}
 	}
 
-	logger.Debug("admin auth failed local token check",
-		"token_prefix", token[:min(len(token), 12)],
-		"expected_prefix", s.localAdminToken[:min(len(s.localAdminToken), 12)],
-		"token_len", len(token),
-		"expected_len", len(s.localAdminToken))
-
 	agent, err := s.authenticateAgent(token)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid authorization")
