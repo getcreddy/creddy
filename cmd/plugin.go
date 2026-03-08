@@ -42,17 +42,18 @@ var pluginListCmd = &cobra.Command{
 }
 
 var pluginInstallCmd = &cobra.Command{
-	Use:   "install <plugin[@version]> [plugin[@version]...]",
-	Short: "Install plugins",
+	Use:     "add <plugin[@version]> [plugin[@version]...]",
+	Aliases: []string{"install"},
+	Short:   "Install plugins",
 	Long: `Install plugins from the registry, OCI registry, or a URL.
 
 Examples:
-  creddy plugin install github
-  creddy plugin install github@0.2.0
-  creddy plugin install github anthropic doppler
-  creddy plugin install https://example.com/creddy-custom.tar.gz
-  creddy plugin install ttl.sh/creddy-github:1h
-  creddy plugin install plugins.creddy.dev/github:0.1.0`,
+  creddy plugin add github
+  creddy plugin add github@0.2.0
+  creddy plugin add github anthropic doppler
+  creddy plugin add https://example.com/creddy-custom.tar.gz
+  creddy plugin add ttl.sh/creddy-github:1h
+  creddy plugin add plugins.creddy.dev/github:0.1.0`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPluginInstall,
 }
@@ -384,7 +385,7 @@ func runPluginList(cmd *cobra.Command, args []string) error {
 		// Show only installed plugins
 		if len(installed) == 0 {
 			fmt.Println("No plugins installed.")
-			fmt.Println("\nInstall plugins with: creddy plugin install <name>")
+			fmt.Println("\nInstall plugins with: creddy plugin add <name>")
 			return nil
 		}
 

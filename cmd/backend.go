@@ -108,8 +108,9 @@ var backendListCmd = &cobra.Command{
 }
 
 var backendRemoveCmd = &cobra.Command{
-	Use:   "remove [name]",
-	Short: "Remove a credential backend",
+	Use:     "rm <name>",
+	Aliases: []string{"remove"},
+	Short:   "Remove a credential backend",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -316,7 +317,7 @@ func getPluginSchema(pluginType string) ([]ConfigField, error) {
 	// Find the plugin binary
 	binaryPath := findPluginBinary(pluginDir, pluginType)
 	if binaryPath == "" {
-		return nil, fmt.Errorf("plugin not found: %s (install with: creddy plugin install %s)", pluginType, pluginType)
+		return nil, fmt.Errorf("plugin not found: %s (install with: creddy plugin add %s)", pluginType, pluginType)
 	}
 
 	// Run the plugin with 'schema' command
