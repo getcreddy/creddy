@@ -36,9 +36,15 @@ func addAdminToken(req *http.Request) {
 
 	for _, path := range tokenPaths {
 		if token, err := os.ReadFile(path); err == nil {
+			if viper.GetBool("debug") {
+				fmt.Fprintf(os.Stderr, "[DEBUG] admin token loaded from %s (len=%d, prefix=%s)\n", path, len(token), string(token[:min(len(token), 12)]))
+			}
 			req.Header.Set("Authorization", "Bearer "+string(token))
 			return
 		}
+	}
+	if viper.GetBool("debug") {
+		fmt.Fprintf(os.Stderr, "[DEBUG] no admin token found, tried: %v\n", tokenPaths)
 	}
 }
 
