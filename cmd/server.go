@@ -146,8 +146,9 @@ var serverCmd = &cobra.Command{
 		errCh := make(chan error, 2)
 
 		// Always listen on localhost for local CLI access
+		// Skip if already listening on 0.0.0.0 (covers all interfaces) or 127.0.0.1
 		localAddr := "127.0.0.1:8400"
-		if listen != localAddr && !strings.HasPrefix(listen, "127.0.0.1:") {
+		if listen != localAddr && !strings.HasPrefix(listen, "127.0.0.1:") && !strings.HasPrefix(listen, "0.0.0.0:") {
 			go func() {
 				logger.Info("listening", "addr", localAddr, "type", "local admin")
 				fmt.Printf("Listening on %s (local admin)\n", localAddr)
