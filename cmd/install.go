@@ -23,11 +23,11 @@ ExecStart={{EXEC_START}}
 Restart=on-failure
 RestartSec=5
 
-# Security hardening
+# Security hardening (relaxed for plugin subprocess compatibility)
 NoNewPrivileges=true
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths={{DATA_DIR}}
+ReadWritePaths={{DATA_DIR}} /tmp
 
 [Install]
 WantedBy=multi-user.target
