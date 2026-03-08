@@ -68,7 +68,6 @@ Use 'creddy plugin list' to see available plugins.`,
 
 var backendListCmd = &cobra.Command{
 	Use:   "ls",
-	Aliases: []string{"list"},
 	Short: "List configured backends",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := viper.GetString("admin.url")

@@ -37,7 +37,6 @@ var pluginCmd = &cobra.Command{
 
 var pluginListCmd = &cobra.Command{
 	Use:   "ls",
-	Aliases: []string{"list"},
 	Short: "List installed and available plugins",
 	RunE:  runPluginList,
 }
@@ -71,7 +70,6 @@ Examples:
 
 var pluginRemoveCmd = &cobra.Command{
 	Use:   "rm <plugin> [plugin...]",
-	Aliases: []string{"remove"},
 	Short: "Remove installed plugins",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runPluginRemove,

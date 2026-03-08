@@ -15,7 +15,6 @@ import (
 
 var listCmd = &cobra.Command{
 	Use:   "ls",
-	Aliases: []string{"list"},
 	Short: "List active credentials",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		flagServer, _ := cmd.Flags().GetString("server")

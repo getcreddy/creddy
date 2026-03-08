@@ -150,7 +150,6 @@ var agentCreateCmd = &cobra.Command{
 
 var agentListCmd = &cobra.Command{
 	Use:   "ls",
-	Aliases: []string{"list"},
 	Short: "List registered agents",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverURL := viper.GetString("admin.url")

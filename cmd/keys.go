@@ -20,7 +20,6 @@ var keysCmd = &cobra.Command{
 
 var keysListCmd = &cobra.Command{
 	Use:   "ls",
-	Aliases: []string{"list"},
 	Short: "List all public signing keys",
 	Long:  `List all agent public keys. These can be added to GitHub for commit signature verification.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
