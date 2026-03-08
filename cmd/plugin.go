@@ -217,15 +217,22 @@ func triggerPluginReload() {
 		return
 	}
 
-	// Try to add admin token if available
+	// Try to add admin token if available - check multiple locations
+	var tokenPaths []string
 	dataDir := viper.GetString("data-dir")
-	if dataDir == "" {
-		home, _ := os.UserHomeDir()
-		dataDir = filepath.Join(home, ".creddy")
+	if dataDir != "" {
+		tokenPaths = append(tokenPaths, filepath.Join(dataDir, ".admin-token"))
 	}
-	tokenPath := filepath.Join(dataDir, ".admin-token")
-	if tokenBytes, err := os.ReadFile(tokenPath); err == nil {
-		req.Header.Set("Authorization", "Bearer "+string(tokenBytes))
+	// Check common locations
+	tokenPaths = append(tokenPaths, "/var/lib/creddy/.admin-token")
+	if home, err := os.UserHomeDir(); err == nil {
+		tokenPaths = append(tokenPaths, filepath.Join(home, ".creddy", ".admin-token"))
+	}
+	for _, tokenPath := range tokenPaths {
+		if tokenBytes, err := os.ReadFile(tokenPath); err == nil {
+			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenBytes)))
+			break
+		}
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -1016,6 +1023,23 @@ func reloadPlugin(pluginName string) error {
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		return err
+	}
+
+	// Add admin token - check multiple locations
+	var tokenPaths []string
+	dataDir := viper.GetString("data-dir")
+	if dataDir != "" {
+		tokenPaths = append(tokenPaths, filepath.Join(dataDir, ".admin-token"))
+	}
+	tokenPaths = append(tokenPaths, "/var/lib/creddy/.admin-token")
+	if home, err := os.UserHomeDir(); err == nil {
+		tokenPaths = append(tokenPaths, filepath.Join(home, ".creddy", ".admin-token"))
+	}
+	for _, tokenPath := range tokenPaths {
+		if tokenBytes, err := os.ReadFile(tokenPath); err == nil {
+			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenBytes)))
+			break
+		}
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
